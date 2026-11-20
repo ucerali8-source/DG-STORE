@@ -8,6 +8,27 @@
   <meta name="theme-color" content="#090d16" />
   <title>DOĞU STORE — Mağaza Yönetim Sistemi</title>
   <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <script type="module">
+    import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import {
+      getFirestore,
+      doc,
+      setDoc,
+      getDoc,
+      onSnapshot
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    window.__FIREBASE_SDK__ = {
+      initializeApp,
+      getApps,
+      getFirestore,
+      doc,
+      setDoc,
+      getDoc,
+      onSnapshot
+    };
+    window.dispatchEvent(new Event("firebase-sdk-ready"));
+  </script>
   <style>
     :root {
       --safe-top: env(safe-area-inset-top, 0px);
@@ -427,6 +448,7 @@
 
   <script>
     const STORAGE_KEY = 'DOGU_STORE_V4_DATA';
+    const FB_CONFIG_KEY = 'DOGU_STORE_FIREBASE_CONFIG';
 
     function uid(p='id') {
       return p + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
@@ -453,6 +475,7 @@
 
     function defaultState() {
       return {
+        updatedAt: nowISO(),
         settings: {
           storeName: 'DOĞU STORE',
           storeLogoText: 'DS',
@@ -476,32 +499,62 @@
       };
     }
 
+    function normalizeState(p) {
+      const d = defaultState();
+      const obj = p && typeof p === 'object' ? p : {};
+      return {
+        ...d,
+        ...obj,
+        updatedAt: obj.updatedAt || d.updatedAt,
+        settings: { ...d.settings, ...(obj.settings || {}) },
+        users: Array.isArray(obj.users) && obj.users.length ? obj.users : d.users,
+        products: Array.isArray(obj.products) ? obj.products : [],
+        sales: Array.isArray(obj.sales) ? obj.sales : [],
+        customers: Array.isArray(obj.customers) ? obj.customers : [],
+        transactions: Array.isArray(obj.transactions) ? obj.transactions : [],
+        expenses: Array.isArray(obj.expenses) ? obj.expenses : [],
+        stockMovements: Array.isArray(obj.stockMovements) ? obj.stockMovements : [],
+        auditLogs: Array.isArray(obj.auditLogs) ? obj.auditLogs : [],
+        recentScans: Array.isArray(obj.recentScans) ? obj.recentScans : []
+      };
+    }
+
     function loadState() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('DOGU_STORE_V3_DATA') || localStorage.getItem('DOGU_STORE_V2_DATA');
         if (!raw) return defaultState();
-        const p = JSON.parse(raw);
-        const d = defaultState();
-        return {
-          ...d,
-          ...p,
-          settings: { ...d.settings, ...(p.settings || {}) },
-          users: Array.isArray(p.users) && p.users.length ? p.users : d.users,
-          products: Array.isArray(p.products) ? p.products : [],
-          sales: Array.isArray(p.sales) ? p.sales : [],
-          customers: Array.isArray(p.customers) ? p.customers : [],
-          transactions: Array.isArray(p.transactions) ? p.transactions : [],
-          expenses: Array.isArray(p.expenses) ? p.expenses : [],
-          stockMovements: Array.isArray(p.stockMovements) ? p.stockMovements : [],
-          auditLogs: Array.isArray(p.auditLogs) ? p.auditLogs : [],
-          recentScans: Array.isArray(p.recentScans) ? p.recentScans : []
-        };
+        return normalizeState(JSON.parse(raw));
       } catch (e) {
         return defaultState();
       }
     }
 
+    function loadFirebaseConfig() {
+      try {
+        const raw = localStorage.getItem(FB_CONFIG_KEY);
+        if (!raw) return { apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', storeDocId: 'dogu_store_main' };
+        const p = JSON.parse(raw);
+        return {
+          apiKey: p.apiKey || '',
+          authDomain: p.authDomain || '',
+          projectId: p.projectId || '',
+          storageBucket: p.storageBucket || '',
+          messagingSenderId: p.messagingSenderId || '',
+          appId: p.appId || '',
+          storeDocId: (p.storeDocId || 'dogu_store_main').trim() || 'dogu_store_main'
+        };
+      } catch (e) {
+        return { apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', storeDocId: 'dogu_store_main' };
+      }
+    }
+
     let state = loadState();
+    let fbConfig = loadFirebaseConfig();
+    let fbDb = null;
+    let fbUnsub = null;
+    let fbStatusText = 'Yerel Mod (Firebase Bağlı Değil)';
+    let applyingRemote = false;
+
     let currentUser = null;
     let activeTab = 'dashboard';
     let cart = [];
@@ -520,8 +573,126 @@
     let reportYear = nowInit.getFullYear();
     let reportMonth = nowInit.getMonth() + 1;
 
+    function hasValidFirebaseConfig(cfg = fbConfig) {
+      return Boolean(cfg && String(cfg.apiKey || '').trim() && String(cfg.projectId || '').trim());
+    }
+
+    function getStoreDocRef() {
+      const sdk = window.__FIREBASE_SDK__;
+      if (!sdk || !fbDb) return null;
+      return sdk.doc(fbDb, 'stores', fbConfig.storeDocId || 'dogu_store_main');
+    }
+
+    async function pushStateToCloud(silent=true) {
+      const sdk = window.__FIREBASE_SDK__;
+      const ref = getStoreDocRef();
+      if (!sdk || !ref || applyingRemote) return;
+      try {
+        await sdk.setDoc(ref, {
+          data: state,
+          updatedAt: state.updatedAt || nowISO()
+        });
+        fbStatusText = 'Bağlı (Canlı Eşitleniyor)';
+        if (!silent) toast('Veriler buluta kaydedildi.', 'success');
+      } catch (e) {
+        fbStatusText = 'Bulut Yazma Hatası';
+        if (!silent) toast('Buluta yazılamadı: ' + (e.message || 'Yetki/Bağlantı hatası'), 'error');
+      }
+    }
+
+    async function initFirebaseSync() {
+      if (fbUnsub) {
+        try { fbUnsub(); } catch (e) {}
+        fbUnsub = null;
+      }
+      fbDb = null;
+
+      if (!hasValidFirebaseConfig(fbConfig)) {
+        fbStatusText = 'Yerel Mod (Firebase Ayarlanmadı)';
+        return;
+      }
+
+      const sdk = window.__FIREBASE_SDK__;
+      if (!sdk) {
+        fbStatusText = 'Firebase SDK Yükleniyor...';
+        return;
+      }
+
+      try {
+        const appName = 'dogu_store_' + fbConfig.projectId;
+        const existing = sdk.getApps().find(a => a.name === appName);
+        const app = existing || sdk.initializeApp({
+          apiKey: fbConfig.apiKey.trim(),
+          authDomain: (fbConfig.authDomain || `${fbConfig.projectId}.firebaseapp.com`).trim(),
+          projectId: fbConfig.projectId.trim(),
+          storageBucket: (fbConfig.storageBucket || `${fbConfig.projectId}.appspot.com`).trim(),
+          messagingSenderId: (fbConfig.messagingSenderId || '').trim(),
+          appId: (fbConfig.appId || '').trim()
+        }, appName);
+
+        fbDb = sdk.getFirestore(app);
+        const ref = getStoreDocRef();
+        fbStatusText = 'Bağlı (Canlı Eşitleniyor)';
+
+        const snap = await sdk.getDoc(ref);
+        if (snap.exists()) {
+          const remotePayload = snap.data();
+          const remoteState = normalizeState(remotePayload?.data || remotePayload);
+          const remoteTime = new Date(remoteState.updatedAt || 0).getTime();
+          const localTime = new Date(state.updatedAt || 0).getTime();
+
+          if (remoteTime > localTime || (!state.products.length && !state.sales.length && !state.customers.length)) {
+            applyingRemote = true;
+            state = remoteState;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            applyingRemote = false;
+            if (currentUser) {
+              currentUser = state.users.find(u => u.id === currentUser.id) || currentUser;
+            }
+            render();
+          } else if (localTime > remoteTime) {
+            await pushStateToCloud(true);
+          }
+        } else {
+          await pushStateToCloud(true);
+        }
+
+        fbUnsub = sdk.onSnapshot(ref, (docSnap) => {
+          if (!docSnap.exists() || docSnap.metadata.hasPendingWrites) return;
+          const remotePayload = docSnap.data();
+          const remoteState = normalizeState(remotePayload?.data || remotePayload);
+          const remoteTime = new Date(remoteState.updatedAt || 0).getTime();
+          const localTime = new Date(state.updatedAt || 0).getTime();
+          if (remoteTime > localTime) {
+            applyingRemote = true;
+            state = remoteState;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            if (currentUser) {
+              currentUser = state.users.find(u => u.id === currentUser.id) || currentUser;
+            }
+            applyingRemote = false;
+            fbStatusText = 'Bağlı (Canlı Eşitleniyor)';
+            render();
+            toast('Diğer cihazdaki değişiklikler eşitlendi.', 'info');
+          }
+        }, () => {
+          fbStatusText = 'Bulut Bağlantı Hatası';
+        });
+      } catch (e) {
+        fbStatusText = 'Firebase Yapılandırma Hatası';
+      }
+    }
+
+    window.addEventListener('firebase-sdk-ready', () => {
+      initFirebaseSync();
+    });
+
     function saveState() {
+      state.updatedAt = nowISO();
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+      if (hasValidFirebaseConfig(fbConfig)) {
+        pushStateToCloud(true);
+      }
     }
 
     function toast(msg, kind='info') {
@@ -981,7 +1152,6 @@
       document.getElementById('quickLookupModal').classList.add('hidden');
     }
 
-    /* ================= GÜN SONU Z RAPORU / KASA ÖZETİ ================= */
     function buildZReportData(dateStr) {
       const key = dateStr || zReportDate || toLocalDateKey(new Date());
       const daySales = state.sales.filter(s => s.status !== 'cancelled' && toLocalDateKey(s.createdAt) === key);
@@ -990,9 +1160,7 @@
       const breakdown = { nakit: 0, kredi_karti: 0, iban: 0, veresiye: 0 };
       const counts = { nakit: 0, kredi_karti: 0, iban: 0, veresiye: 0 };
 
-      let grossTotal = 0;
-      let totalDiscount = 0;
-      let totalItems = 0;
+      let grossTotal = 0, totalDiscount = 0, totalItems = 0;
 
       daySales.forEach(s => {
         const m = breakdown[s.paymentMethod] !== undefined ? s.paymentMethod : 'nakit';
@@ -1071,7 +1239,6 @@
       document.getElementById('zReportModal').classList.add('hidden');
     }
 
-    /* ================= GÜN VE HAFTA BAZLI SATIŞ RAPORU ================= */
     function getMonthDayAndWeekReport(year, month) {
       const daysInMonth = new Date(year, month, 0).getDate();
       const activeSales = state.sales.filter(s => {
@@ -1181,6 +1348,7 @@
             <div class="logo-badge" style="width:60px;height:60px;margin:0 auto;font-size:22px;border-radius:18px;">${esc(state.settings.storeLogoText || 'DS')}</div>
             <h1 class="title-lg" style="font-size:24px;">${esc(state.settings.storeName || 'DOĞU STORE')}</h1>
             <div class="muted">Mağaza, Stok, Barkod, Veresiye ve Finans</div>
+            <div class="muted ${hasValidFirebaseConfig(fbConfig)?'text-green':'text-amber'}">${esc(fbStatusText)}</div>
           </div>
 
           <div class="card stack">
@@ -1246,7 +1414,7 @@
             <div class="logo-badge">${esc(state.settings.storeLogoText || 'DS')}</div>
             <div style="min-width:0;">
               <div style="font-weight:800;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(state.settings.storeName || 'DOĞU STORE')}</div>
-              <div class="muted">${esc(currentUser.name)} • ${isAdmin() ? 'Yönetici' : 'Personel'}</div>
+              <div class="muted">${esc(currentUser.name)} • ${isAdmin() ? 'Yönetici' : 'Personel'} • <span class="${hasValidFirebaseConfig(fbConfig)?'text-green':'text-amber'}">${esc(fbStatusText)}</span></div>
             </div>
           </div>
           <div class="row-gap">
@@ -1294,18 +1462,13 @@
       if (activeTab === 'products') drawProductRows();
     }
 
-    function onTopScan(code) {
-      showQuickLookup(code);
-    }
+    function onTopScan(code) { showQuickLookup(code); }
 
     function openNewProductWithBarcode(code) {
       const box = document.getElementById('newProdBox');
       if (box) box.classList.remove('hidden');
       const inp = document.getElementById('pBarcode');
-      if (inp) {
-        inp.value = code;
-        inp.focus();
-      }
+      if (inp) { inp.value = code; inp.focus(); }
       toast('Kod eklendi: ' + code + ' — Ürün bilgilerini girip Kaydet\'e basın.', 'success');
     }
 
@@ -1788,8 +1951,27 @@
       return `
         <div class="row-between">
           <div><h2 class="title-lg">Müşteri ve Veresiye</h2><div class="muted text-amber">Toplam Borç: ${formatTL(totDebt)}</div></div>
-          <button onclick="addCust()" class="btn btn-primary btn-sm">+ Yeni Müşteri</button>
+          <button onclick="document.getElementById('newCustBox').classList.toggle('hidden')" class="btn btn-primary btn-sm">+ Yeni Müşteri</button>
         </div>
+
+        <div id="newCustBox" class="card stack hidden">
+          <div class="title-md">Veresiye Listesine Müşteri Ekle</div>
+          <div class="muted">Satış yapmadan doğrudan müşteriyi ekleyip önceden kalan güncel borcunu girebilirsiniz.</div>
+          <div class="grid-3">
+            <div><label class="lbl">Ad Soyad *</label><input id="cName" type="text" class="input" placeholder="Örn: Ali Yılmaz" /></div>
+            <div><label class="lbl">Telefon</label><input id="cPhone" type="text" class="input" placeholder="05xx..." /></div>
+            <div><label class="lbl">Önceden Kalan Güncel Borç (TL)</label><input id="cInitDebt" type="number" step="0.01" min="0" value="0" class="input" placeholder="0.00" /></div>
+          </div>
+          <div>
+            <label class="lbl">Güncel Borç Notu</label>
+            <input id="cInitNote" type="text" class="input" placeholder="Örn: Geçen aydan kalan borç, haftaya ödeyecek..." />
+          </div>
+          <div class="row-gap" style="justify-content:flex-end;">
+            <button onclick="document.getElementById('newCustBox').classList.add('hidden')" class="btn btn-secondary btn-sm">Vazgeç</button>
+            <button onclick="saveNewCustomer()" class="btn btn-success btn-sm">Listeye Ekle</button>
+          </div>
+        </div>
+
         ${state.customers.length ? state.customers.map(c => {
           const bal = Math.max(0, Number(c.balance || 0));
           const isPaidOff = bal <= 0;
@@ -1823,7 +2005,7 @@
 
               ${trns.length ? trns.slice(0,5).map(t => `
                 <div class="list-item" style="font-size:12px;">
-                  <span>${formatDT(t.createdAt)} • ${t.type==='payment'?'Tahsilat ('+t.method+')':'Veresiye'}</span>
+                  <span>${formatDT(t.createdAt)} • ${esc(t.note || (t.type==='payment'?'Tahsilat ('+t.method+')':'Veresiye'))}</span>
                   <div class="row-gap">
                     <strong class="${t.type==='payment'?'text-green':'text-amber'}">${t.type==='payment'?'-':'+'}${formatTL(t.amount)}</strong>
                     ${(isAdmin() && t.type==='payment') ? `<button onclick="revTrn('${t.id}')" class="btn btn-danger btn-sm">Düzelt</button>` : ''}
@@ -1836,14 +2018,28 @@
       `;
     }
 
-    function addCust() {
-      const fullName = (prompt('Ad Soyad:') || '').trim();
-      if (!fullName) return;
-      const phone = (prompt('Telefon:') || '').trim();
-      const notes = (prompt('Güncel borç notu (isteğe bağlı):', '') || '').trim();
-      state.customers.unshift({ id: uid('cst'), fullName, phone, notes, balance: 0, createdAt: nowISO() });
-      logAction('Müşteri Eklendi', fullName);
-      saveState(); render(); toast('Müşteri eklendi.', 'success');
+    function saveNewCustomer() {
+      const fullName = (document.getElementById('cName')?.value || '').trim();
+      if (!fullName) { toast('Müşteri adı soyadı girin!', 'error'); return; }
+      const phone = (document.getElementById('cPhone')?.value || '').trim();
+      const initDebt = Math.max(0, Number(document.getElementById('cInitDebt')?.value || 0));
+      const notes = (document.getElementById('cInitNote')?.value || '').trim();
+
+      const cid = uid('cst');
+      const createdAt = nowISO();
+      state.customers.unshift({ id: cid, fullName, phone, notes, balance: initDebt, createdAt });
+
+      if (initDebt > 0) {
+        state.transactions.unshift({
+          id: uid('trn'), customerId: cid, customerName: fullName, saleId: null,
+          type: 'debt', amount: initDebt, method: 'veresiye',
+          note: 'Önceden kalan güncel borç girişi', isReversed: false, createdAt
+        });
+      }
+
+      logAction('Müşteri Eklendi', `${fullName}${initDebt > 0 ? ' • Açılış Borcu: ' + formatTL(initDebt) : ''}`);
+      saveState(); render();
+      toast(initDebt > 0 ? `${fullName} ${formatTL(initDebt)} borç ile eklendi.` : `${fullName} veresiye listesine eklendi.`, 'success');
     }
 
     function saveCustomerNote(cid) {
@@ -2159,6 +2355,30 @@
       const adm = state.users.find(u => u.role === 'admin') || state.users[0];
       return `
         <h2 class="title-lg">Uygulama Ayarları</h2>
+
+        <div class="card stack">
+          <div class="row-between">
+            <div class="title-md" style="margin:0;">Bulut Senkronizasyonu (Firebase Firestore)</div>
+            <span class="muted ${hasValidFirebaseConfig(fbConfig)?'text-green':'text-amber'}" style="font-weight:700;">${esc(fbStatusText)}</span>
+          </div>
+          <div class="muted">Telefon ve bilgisayarda aynı bilgileri girerek tüm verileri otomatik eşitleyebilirsiniz.</div>
+          <div class="grid-3">
+            <div><label class="lbl">apiKey *</label><input id="fbApiKey" type="text" value="${esc(fbConfig.apiKey)}" placeholder="AIzaSy..." class="input" /></div>
+            <div><label class="lbl">projectId *</label><input id="fbProjectId" type="text" value="${esc(fbConfig.projectId)}" placeholder="magaza-projesi" class="input" /></div>
+            <div><label class="lbl">Mağaza Kimliği (Doc ID)</label><input id="fbDocId" type="text" value="${esc(fbConfig.storeDocId)}" placeholder="dogu_store_main" class="input" /></div>
+          </div>
+          <div class="grid-3">
+            <div><label class="lbl">authDomain</label><input id="fbAuthDomain" type="text" value="${esc(fbConfig.authDomain)}" placeholder="proje.firebaseapp.com" class="input" /></div>
+            <div><label class="lbl">storageBucket</label><input id="fbBucket" type="text" value="${esc(fbConfig.storageBucket)}" placeholder="proje.appspot.com" class="input" /></div>
+            <div><label class="lbl">appId</label><input id="fbAppId" type="text" value="${esc(fbConfig.appId)}" placeholder="1:123:web:abc" class="input" /></div>
+          </div>
+          <div class="row-gap">
+            <button onclick="saveFirebaseSettings()" class="btn btn-primary btn-sm">Bulutu Kaydet ve Bağlan</button>
+            <button onclick="pushStateToCloud(false)" class="btn btn-success btn-sm">Şimdi Buluta Gönder</button>
+            <button onclick="clearFirebaseSettings()" class="btn btn-secondary btn-sm">Bulut Bağlantısını Kaldır</button>
+          </div>
+        </div>
+
         <div class="card stack">
           <div class="title-md">Mağaza ve Güvenlik</div>
           <div class="grid-3">
@@ -2196,6 +2416,40 @@
           </div>
         </div>
       `;
+    }
+
+    async function saveFirebaseSettings() {
+      const nextCfg = {
+        apiKey: (document.getElementById('fbApiKey')?.value || '').trim(),
+        projectId: (document.getElementById('fbProjectId')?.value || '').trim(),
+        storeDocId: ((document.getElementById('fbDocId')?.value || 'dogu_store_main').trim() || 'dogu_store_main'),
+        authDomain: (document.getElementById('fbAuthDomain')?.value || '').trim(),
+        storageBucket: (document.getElementById('fbBucket')?.value || '').trim(),
+        messagingSenderId: fbConfig.messagingSenderId || '',
+        appId: (document.getElementById('fbAppId')?.value || '').trim()
+      };
+      if (!nextCfg.apiKey || !nextCfg.projectId) {
+        toast('En az apiKey ve projectId alanlarını girin!', 'error');
+        return;
+      }
+      fbConfig = nextCfg;
+      try { localStorage.setItem(FB_CONFIG_KEY, JSON.stringify(fbConfig)); } catch (e) {}
+      await initFirebaseSync();
+      render();
+      toast('Firebase ayarları kaydedildi ve bağlantı başlatıldı.', 'success');
+    }
+
+    function clearFirebaseSettings() {
+      if (fbUnsub) {
+        try { fbUnsub(); } catch (e) {}
+        fbUnsub = null;
+      }
+      fbDb = null;
+      fbConfig = { apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', storeDocId: 'dogu_store_main' };
+      try { localStorage.removeItem(FB_CONFIG_KEY); } catch (e) {}
+      fbStatusText = 'Yerel Mod (Firebase Bağlı Değil)';
+      render();
+      toast('Bulut bağlantısı kaldırıldı; yerel hafıza kullanılıyor.', 'info');
     }
 
     function saveSet() {
@@ -2248,9 +2502,9 @@
       r.onload = () => {
         try {
           const p = JSON.parse(String(r.result || ''));
-          state = { ...defaultState(), ...p };
+          state = normalizeState({ ...p, updatedAt: nowISO() });
           currentUser = state.users.find(u => u.id === currentUser?.id) || state.users[0];
-          saveState(); render(); toast('Veriler içe aktarıldı.', 'success');
+          saveState(); render(); toast('Veriler içe aktarıldı ve eşitlendi.', 'success');
         } catch (e) { toast('Hatalı JSON dosyası!', 'error'); }
       };
       r.readAsText(f);
@@ -2262,6 +2516,7 @@
       const fresh = defaultState();
       fresh.settings.storeName = state.settings.storeName;
       fresh.settings.storeLogoText = state.settings.storeLogoText;
+      fresh.updatedAt = nowISO();
       state = fresh;
       currentUser = state.users[0];
       cart = [];
@@ -2269,6 +2524,9 @@
     }
 
     render();
+    if (window.__FIREBASE_SDK__ && hasValidFirebaseConfig(fbConfig)) {
+      initFirebaseSync();
+    }
   </script>
 </body>
 </html>
