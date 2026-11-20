@@ -987,18 +987,8 @@
       const daySales = state.sales.filter(s => s.status !== 'cancelled' && toLocalDateKey(s.createdAt) === key);
       const cancelledDaySales = state.sales.filter(s => s.status === 'cancelled' && toLocalDateKey(s.createdAt) === key);
 
-      const breakdown = {
-        nakit: 0,
-        kredi_karti: 0,
-        iban: 0,
-        veresiye: 0
-      };
-      const counts = {
-        nakit: 0,
-        kredi_karti: 0,
-        iban: 0,
-        veresiye: 0
-      };
+      const breakdown = { nakit: 0, kredi_karti: 0, iban: 0, veresiye: 0 };
+      const counts = { nakit: 0, kredi_karti: 0, iban: 0, veresiye: 0 };
 
       let grossTotal = 0;
       let totalDiscount = 0;
@@ -1023,19 +1013,9 @@
       const cashInDrawer = breakdown.nakit + colNakit - dayExpenses;
 
       return {
-        key,
-        saleCount: daySales.length,
-        cancelledCount: cancelledDaySales.length,
-        totalItems,
-        grossTotal,
-        totalDiscount,
-        breakdown,
-        counts,
-        colNakit,
-        colIban,
-        totalCollections,
-        dayExpenses,
-        cashInDrawer
+        key, saleCount: daySales.length, cancelledCount: cancelledDaySales.length,
+        totalItems, grossTotal, totalDiscount, breakdown, counts,
+        colNakit, colIban, totalCollections, dayExpenses, cashInDrawer
       };
     }
 
@@ -1061,22 +1041,10 @@
         </div>
 
         <div class="grid-2">
-          <div class="sub-box" style="margin-top:0;">
-            <div class="muted">Nakit Satış (${d.counts.nakit})</div>
-            <div class="val-lg text-green">${formatTL(d.breakdown.nakit)}</div>
-          </div>
-          <div class="sub-box" style="margin-top:0;">
-            <div class="muted">Kredi Kartı (${d.counts.kredi_karti})</div>
-            <div class="val-lg text-blue">${formatTL(d.breakdown.kredi_karti)}</div>
-          </div>
-          <div class="sub-box" style="margin-top:0;">
-            <div class="muted">IBAN / Havale (${d.counts.iban})</div>
-            <div class="val-lg text-white">${formatTL(d.breakdown.iban)}</div>
-          </div>
-          <div class="sub-box" style="margin-top:0;">
-            <div class="muted">Veresiye Satış (${d.counts.veresiye})</div>
-            <div class="val-lg text-amber">${formatTL(d.breakdown.veresiye)}</div>
-          </div>
+          <div class="sub-box" style="margin-top:0;"><div class="muted">Nakit Satış (${d.counts.nakit})</div><div class="val-lg text-green">${formatTL(d.breakdown.nakit)}</div></div>
+          <div class="sub-box" style="margin-top:0;"><div class="muted">Kredi Kartı (${d.counts.kredi_karti})</div><div class="val-lg text-blue">${formatTL(d.breakdown.kredi_karti)}</div></div>
+          <div class="sub-box" style="margin-top:0;"><div class="muted">IBAN / Havale (${d.counts.iban})</div><div class="val-lg text-white">${formatTL(d.breakdown.iban)}</div></div>
+          <div class="sub-box" style="margin-top:0;"><div class="muted">Veresiye Satış (${d.counts.veresiye})</div><div class="val-lg text-amber">${formatTL(d.breakdown.veresiye)}</div></div>
         </div>
 
         <div class="sub-box stack">
@@ -1125,9 +1093,7 @@
         { weekNo: 5, label: `5. Hafta (29–${daysInMonth})`, range: `29 - ${daysInMonth}`, count: 0, qty: 0, total: 0 }
       ];
 
-      let monthTotal = 0;
-      let monthQty = 0;
-      let monthCount = 0;
+      let monthTotal = 0, monthQty = 0, monthCount = 0;
 
       activeSales.forEach(s => {
         const d = new Date(s.createdAt);
@@ -1826,6 +1792,7 @@
         </div>
         ${state.customers.length ? state.customers.map(c => {
           const bal = Math.max(0, Number(c.balance || 0));
+          const isPaidOff = bal <= 0;
           const trns = state.transactions.filter(t => t.customerId === c.id && !t.isReversed);
           const msg = encodeURIComponent(`Sayın ${c.fullName}, ${state.settings.storeName} hesabınızdaki güncel veresiye borcunuz ${formatTL(bal)} tutarındadır.`);
           const wa = `https://wa.me/${String(c.phone || '').replace(/\D/g,'')}?text=${msg}`;
@@ -1833,17 +1800,27 @@
             <div class="card stack">
               <div class="row-between">
                 <div>
-                  <div style="font-weight:800;font-size:15px;">${esc(c.fullName)}</div>
-                  <div class="muted">Tel: ${esc(c.phone || '-')} ${c.notes ? '• Not: ' + esc(c.notes) : ''}</div>
+                  <div style="font-weight:800;font-size:15px;">${esc(c.fullName)} ${isPaidOff ? '<span class="badge" style="background:#059669;margin-left:6px;">BORÇ BİTTİ</span>' : ''}</div>
+                  <div class="muted">Tel: ${esc(c.phone || '-')}</div>
                 </div>
                 <div style="text-align:right;"><div class="muted">Kalan Borç</div><div class="val-lg ${bal>0?'text-red':'text-green'}">${formatTL(bal)}</div></div>
               </div>
+
+              <div class="sub-box" style="margin-top:0;">
+                <label class="lbl">Güncel Borç Notu</label>
+                <div class="row-gap">
+                  <input id="custNote_${c.id}" type="text" value="${esc(c.notes || '')}" placeholder="Örn: Ayın 15'inde ödeyecek, kalan 200 TL..." class="input" style="flex:1;padding:8px 11px;font-size:13px;" onkeydown="if(event.key==='Enter') saveCustomerNote('${c.id}')" />
+                  <button onclick="saveCustomerNote('${c.id}')" class="btn btn-secondary btn-sm">Notu Kaydet</button>
+                </div>
+              </div>
+
               <div class="row-gap">
-                <button onclick="collectDebt('${c.id}',false)" class="btn btn-success btn-sm">Tahsilat Al</button>
+                ${bal > 0 ? `<button onclick="collectDebt('${c.id}',false)" class="btn btn-success btn-sm">Tahsilat Al</button>` : ''}
                 ${bal > 0 ? `<button onclick="collectDebt('${c.id}',true)" class="btn btn-primary btn-sm">Borcu Kapat</button>` : ''}
                 <a href="${wa}" target="_blank" class="btn btn-warning btn-sm">Hatırlatma Hazırla</a>
-                <button onclick="editNote('${c.id}')" class="btn btn-secondary btn-sm">Not</button>
+                ${isPaidOff ? `<button onclick="deleteSettledCustomer('${c.id}')" class="btn btn-danger btn-sm">Listeden Sil</button>` : ''}
               </div>
+
               ${trns.length ? trns.slice(0,5).map(t => `
                 <div class="list-item" style="font-size:12px;">
                   <span>${formatDT(t.createdAt)} • ${t.type==='payment'?'Tahsilat ('+t.method+')':'Veresiye'}</span>
@@ -1863,19 +1840,35 @@
       const fullName = (prompt('Ad Soyad:') || '').trim();
       if (!fullName) return;
       const phone = (prompt('Telefon:') || '').trim();
-      const notes = (prompt('Not:', '') || '').trim();
+      const notes = (prompt('Güncel borç notu (isteğe bağlı):', '') || '').trim();
       state.customers.unshift({ id: uid('cst'), fullName, phone, notes, balance: 0, createdAt: nowISO() });
       logAction('Müşteri Eklendi', fullName);
       saveState(); render(); toast('Müşteri eklendi.', 'success');
     }
 
-    function editNote(cid) {
+    function saveCustomerNote(cid) {
       const c = state.customers.find(x => x.id === cid);
       if (!c) return;
-      const n = prompt('Müşteri notu:', c.notes || '');
-      if (n === null) return;
-      c.notes = n.trim();
-      saveState(); render(); toast('Not kaydedildi.', 'success');
+      const inp = document.getElementById('custNote_' + cid);
+      const val = (inp ? inp.value : '').trim();
+      c.notes = val;
+      logAction('Borç Notu Güncellendi', `${c.fullName}: ${val || '(boş)'}`);
+      saveState(); render(); toast('Borç notu kaydedildi.', 'success');
+    }
+
+    function deleteSettledCustomer(cid) {
+      const c = state.customers.find(x => x.id === cid);
+      if (!c) return;
+      const bal = Math.max(0, Number(c.balance || 0));
+      if (bal > 0) {
+        toast('Müşterinin henüz kapanmamış borcu var (' + formatTL(bal) + ').', 'error');
+        return;
+      }
+      if (!confirm(`${c.fullName} adlı müşterinin borcu bitti; listeden silinsin mi?`)) return;
+      state.customers = state.customers.filter(x => x.id !== cid);
+      if (selectedCustId === cid) selectedCustId = '';
+      logAction('Borcu Kapanan Müşteri Silindi', c.fullName);
+      saveState(); render(); toast(`${c.fullName} listeden silindi.`, 'success');
     }
 
     function collectDebt(cid, full) {
@@ -1889,10 +1882,13 @@
       }
       if (isNaN(amt) || amt <= 0) return;
       const m = ((prompt('Yöntem (nakit / iban):', 'nakit') || 'nakit').toLowerCase().includes('iban')) ? 'iban' : 'nakit';
-      c.balance = Math.max(0, bal - amt);
-      state.transactions.unshift({ id: uid('trn'), customerId: c.id, customerName: c.fullName, saleId: null, type: 'payment', amount: amt, method: m, note: full ? 'Borç kapatma' : 'Kısmi tahsilat', isReversed: false, createdAt: nowISO() });
+      const newBal = Math.max(0, bal - amt);
+      c.balance = newBal;
+      if (newBal === 0) c.notes = '';
+      state.transactions.unshift({ id: uid('trn'), customerId: c.id, customerName: c.fullName, saleId: null, type: 'payment', amount: amt, method: m, note: full || newBal === 0 ? 'Borç kapatma' : 'Kısmi tahsilat', isReversed: false, createdAt: nowISO() });
       logAction('Tahsilat Alındı', `${c.fullName}: ${formatTL(amt)} (${m})`);
-      saveState(); render(); toast('Tahsilat kaydedildi.', 'success');
+      saveState(); render();
+      toast(newBal === 0 ? `${c.fullName} borcunu tamamen ödedi! İsterseniz listeden silebilirsiniz.` : 'Tahsilat kaydedildi.', 'success');
     }
 
     function revTrn(tid) {
@@ -1982,7 +1978,6 @@
           <button onclick="openZReportModal(toLocalDateKey(new Date()))" class="btn btn-success btn-sm">Gün Sonu Z Raporu</button>
         </div>
 
-        <!-- Ayın Hafta ve Gün Bazlı Satış Raporu -->
         <div class="card stack">
           <div class="row-between">
             <div>
