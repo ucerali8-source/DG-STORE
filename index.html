@@ -7,6 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#090d16" />
   <title>DOĞU STORE — Mağaza Yönetim Sistemi</title>
+  <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
   <style>
     :root {
       --safe-top: env(safe-area-inset-top, 0px);
@@ -316,6 +317,42 @@
       box-shadow: 0 0 8px #ef4444;
       pointer-events: none;
     }
+    .chip {
+      border: 1px solid var(--border-2);
+      background: #0d1322;
+      color: #e2e8f0;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+    }
+    table.rep-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    table.rep-table th, table.rep-table td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      white-space: nowrap;
+    }
+    table.rep-table th {
+      color: var(--muted);
+      font-size: 12px;
+      background: #0d1322;
+    }
+    @media print {
+      .header-bar, .pill-strip, .bottom-nav, .no-print, #toast, .modal-backdrop { display: none !important; }
+      body, .app-shell { background: #fff !important; color: #000 !important; padding: 0 !important; }
+      .card, .sub-box { background: #fff !important; color: #000 !important; border: 1px solid #cbd5e1 !important; }
+      .muted { color: #475569 !important; }
+      .text-green, .text-blue, .text-amber, .text-red, .text-white { color: #000 !important; }
+    }
   </style>
 </head>
 <body>
@@ -326,10 +363,10 @@
   <div id="barcodeModal" class="modal-backdrop hidden">
     <div class="card stack" style="width:100%;max-width:440px;">
       <div class="row-between">
-        <div class="title-md" style="margin:0;">Barkod Okut / Gir</div>
+        <div class="title-md" style="margin:0;">Barkod & Karekod Okut</div>
         <button onclick="closeBarcodeModal()" class="btn btn-danger btn-sm">Kapat</button>
       </div>
-      <div class="muted" id="barcodeModalHint">Barkodu kameraya tutun, fotoğrafını çekin veya numarasını girin.</div>
+      <div class="muted" id="barcodeModalHint">EAN-13 çizgili barkod veya 2D karekod okutun, fotoğraf çekin ya da numarasını girin.</div>
       <div id="barcodeStatus" class="muted text-amber" style="font-weight:700;">Durum: Hazır</div>
 
       <div class="scan-frame-wrap">
@@ -351,10 +388,25 @@
       </div>
 
       <div class="row-gap">
-        <input id="manualBarcodeInput" type="text" inputmode="numeric" placeholder="Barkod numarasını yazın..." class="input" style="flex:1;" onkeydown="if(event.key==='Enter') submitManualBarcode()" />
+        <input id="manualBarcodeInput" type="text" inputmode="text" placeholder="Barkod / etiket kodu yazın..." class="input" style="flex:1;" onkeydown="if(event.key==='Enter') submitManualBarcode()" />
         <button type="button" onclick="submitManualBarcode()" class="btn btn-primary btn-sm">Kullan</button>
       </div>
+
+      <div id="recentScansBox" class="hidden">
+        <div class="muted" style="margin-bottom:6px;">Son Okutulan Kodlar:</div>
+        <div id="recentScansList" class="row-gap"></div>
+      </div>
     </div>
+  </div>
+
+  <!-- Hızlı Barkod Sorgu Kartı -->
+  <div id="quickLookupModal" class="modal-backdrop hidden">
+    <div id="quickLookupContent" class="card stack" style="width:100%;max-width:420px;"></div>
+  </div>
+
+  <!-- Gün Sonu Z Raporu Modalı -->
+  <div id="zReportModal" class="modal-backdrop hidden">
+    <div id="zReportContent" class="card stack" style="width:100%;max-width:480px;"></div>
   </div>
 
   <!-- Yönetici PIN Modalı -->
@@ -388,6 +440,13 @@
       const d = new Date(iso);
       return d.toLocaleDateString('tr-TR') + ' ' + d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
     }
+    function toLocalDateKey(isoOrDate) {
+      const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
     function esc(s) {
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
@@ -412,7 +471,8 @@
         transactions: [],
         expenses: [],
         stockMovements: [],
-        auditLogs: []
+        auditLogs: [],
+        recentScans: []
       };
     }
 
@@ -433,7 +493,8 @@
           transactions: Array.isArray(p.transactions) ? p.transactions : [],
           expenses: Array.isArray(p.expenses) ? p.expenses : [],
           stockMovements: Array.isArray(p.stockMovements) ? p.stockMovements : [],
-          auditLogs: Array.isArray(p.auditLogs) ? p.auditLogs : []
+          auditLogs: Array.isArray(p.auditLogs) ? p.auditLogs : [],
+          recentScans: Array.isArray(p.recentScans) ? p.recentScans : []
         };
       } catch (e) {
         return defaultState();
@@ -451,6 +512,13 @@
     let barcodeCallback = null;
     let camStream = null;
     let camTimer = null;
+    let zxingReader = null;
+    let scanBusy = false;
+
+    const nowInit = new Date();
+    let zReportDate = toLocalDateKey(nowInit);
+    let reportYear = nowInit.getFullYear();
+    let reportMonth = nowInit.getMonth() + 1;
 
     function saveState() {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
@@ -472,6 +540,27 @@
       el.className = 'muted ' + colorClass;
       el.style.fontWeight = '700';
       el.textContent = 'Durum: ' + msg;
+    }
+
+    function recordRecentScan(code) {
+      const clean = String(code || '').trim();
+      if (!clean) return;
+      state.recentScans = [clean, ...(state.recentScans || []).filter(x => x !== clean)].slice(0, 8);
+      saveState();
+    }
+
+    function renderRecentScans() {
+      const wrap = document.getElementById('recentScansBox');
+      const list = document.getElementById('recentScansList');
+      if (!wrap || !list) return;
+      if (!state.recentScans || !state.recentScans.length) {
+        wrap.classList.add('hidden');
+        return;
+      }
+      wrap.classList.remove('hidden');
+      list.innerHTML = state.recentScans.map(code =>
+        `<button type="button" onclick="completeBarcodeScan('${esc(code)}')" class="chip">${esc(code)}</button>`
+      ).join('');
     }
 
     function logAction(action, detail) {
@@ -539,21 +628,15 @@
     function isValidEAN13(code) {
       if (!/^\d{13}$/.test(code)) return false;
       let sum = 0;
-      for (let i = 0; i < 12; i++) {
-        sum += Number(code[i]) * (i % 2 === 0 ? 1 : 3);
-      }
-      const check = (10 - (sum % 10)) % 10;
-      return check === Number(code[12]);
+      for (let i = 0; i < 12; i++) sum += Number(code[i]) * (i % 2 === 0 ? 1 : 3);
+      return ((10 - (sum % 10)) % 10) === Number(code[12]);
     }
 
     function isValidEAN8(code) {
       if (!/^\d{8}$/.test(code)) return false;
       let sum = 0;
-      for (let i = 0; i < 7; i++) {
-        sum += Number(code[i]) * (i % 2 === 0 ? 3 : 1);
-      }
-      const check = (10 - (sum % 10)) % 10;
-      return check === Number(code[7]);
+      for (let i = 0; i < 7; i++) sum += Number(code[i]) * (i % 2 === 0 ? 3 : 1);
+      return ((10 - (sum % 10)) % 10) === Number(code[7]);
     }
 
     function decodeEANFromRow(row) {
@@ -567,74 +650,71 @@
       }
       runs.push({ v: cur, len: cnt });
 
-      for (let startIdx = 1; startIdx < runs.length - 20; startIdx++) {
-        const g1 = runs[startIdx]?.len || 0;
-        const g2 = runs[startIdx + 1]?.len || 0;
-        const g3 = runs[startIdx + 2]?.len || 0;
-        if (g1 <= 0 || g2 <= 0 || g3 <= 0) continue;
-        const avgMod = (g1 + g2 + g3) / 3;
-        if (avgMod < 1.2) continue;
+      for (let startIdx = 0; startIdx < runs.length - 20; startIdx++) {
+        for (let modSpan = 1; modSpan <= 3; modSpan++) {
+          let sumLen = 0;
+          for (let m = 0; m < modSpan; m++) sumLen += (runs[startIdx + m]?.len || 0);
+          const avgMod = sumLen / modSpan;
+          if (avgMod < 1.0) continue;
 
-        let startPx = 0;
-        for (let k = 0; k < startIdx; k++) startPx += runs[k].len;
+          let startPx = 0;
+          for (let k = 0; k < startIdx; k++) startPx += runs[k].len;
 
-        const span13 = avgMod * 95;
-        if (startPx + span13 <= n) {
-          const bits = [];
-          for (let m = 0; m < 95; m++) {
-            const px = Math.min(n - 1, Math.floor(startPx + (m + 0.5) * avgMod));
-            bits.push(row[px]);
-          }
-          if (bits[0]===1 && bits[1]===0 && bits[2]===1 &&
-              bits[45]===0 && bits[46]===1 && bits[47]===0 && bits[48]===1 && bits[49]===0 &&
-              bits[92]===1 && bits[93]===0 && bits[94]===1) {
-            let parity = '';
-            let leftDigits = '';
-            let ok = true;
-            for (let d = 0; d < 6; d++) {
-              const pat = bits.slice(3 + d * 7, 3 + (d + 1) * 7).join('');
-              if (EAN_L[pat]) { parity += 'L'; leftDigits += EAN_L[pat]; }
-              else if (EAN_G[pat]) { parity += 'G'; leftDigits += EAN_G[pat]; }
-              else { ok = false; break; }
+          const span13 = avgMod * 95;
+          if (startPx + span13 <= n) {
+            const bits = [];
+            for (let m = 0; m < 95; m++) {
+              const px = Math.min(n - 1, Math.floor(startPx + (m + 0.5) * avgMod));
+              bits.push(row[px]);
             }
-            if (ok && EAN13_PARITY[parity]) {
-              let rightDigits = '';
+            if (bits[0]===1 && bits[1]===0 && bits[2]===1 &&
+                bits[45]===0 && bits[46]===1 && bits[47]===0 && bits[48]===1 && bits[49]===0 &&
+                bits[92]===1 && bits[93]===0 && bits[94]===1) {
+              let parity = '', leftDigits = '', ok = true;
               for (let d = 0; d < 6; d++) {
-                const pat = bits.slice(50 + d * 7, 50 + (d + 1) * 7).join('');
-                if (EAN_R[pat]) rightDigits += EAN_R[pat];
+                const pat = bits.slice(3 + d * 7, 3 + (d + 1) * 7).join('');
+                if (EAN_L[pat]) { parity += 'L'; leftDigits += EAN_L[pat]; }
+                else if (EAN_G[pat]) { parity += 'G'; leftDigits += EAN_G[pat]; }
                 else { ok = false; break; }
               }
-              if (ok) {
-                const full13 = EAN13_PARITY[parity] + leftDigits + rightDigits;
-                if (isValidEAN13(full13)) return full13;
+              if (ok && EAN13_PARITY[parity]) {
+                let rightDigits = '';
+                for (let d = 0; d < 6; d++) {
+                  const pat = bits.slice(50 + d * 7, 50 + (d + 1) * 7).join('');
+                  if (EAN_R[pat]) rightDigits += EAN_R[pat];
+                  else { ok = false; break; }
+                }
+                if (ok) {
+                  const full13 = EAN13_PARITY[parity] + leftDigits + rightDigits;
+                  if (isValidEAN13(full13)) return full13;
+                }
               }
             }
           }
-        }
 
-        const span8 = avgMod * 67;
-        if (startPx + span8 <= n) {
-          const bits8 = [];
-          for (let m = 0; m < 67; m++) {
-            const px = Math.min(n - 1, Math.floor(startPx + (m + 0.5) * avgMod));
-            bits8.push(row[px]);
-          }
-          if (bits8[0]===1 && bits8[1]===0 && bits8[2]===1 &&
-              bits8[31]===0 && bits8[32]===1 && bits8[33]===0 && bits8[34]===1 && bits8[35]===0 &&
-              bits8[64]===1 && bits8[65]===0 && bits8[66]===1) {
-            let d8 = '';
-            let ok8 = true;
-            for (let d = 0; d < 4; d++) {
-              const pat = bits8.slice(3 + d * 7, 3 + (d + 1) * 7).join('');
-              if (EAN_L[pat]) d8 += EAN_L[pat]; else { ok8 = false; break; }
+          const span8 = avgMod * 67;
+          if (startPx + span8 <= n) {
+            const bits8 = [];
+            for (let m = 0; m < 67; m++) {
+              const px = Math.min(n - 1, Math.floor(startPx + (m + 0.5) * avgMod));
+              bits8.push(row[px]);
             }
-            if (ok8) {
+            if (bits8[0]===1 && bits8[1]===0 && bits8[2]===1 &&
+                bits8[31]===0 && bits8[32]===1 && bits8[33]===0 && bits8[34]===1 && bits8[35]===0 &&
+                bits8[64]===1 && bits8[65]===0 && bits8[66]===1) {
+              let d8 = '', ok8 = true;
               for (let d = 0; d < 4; d++) {
-                const pat = bits8.slice(36 + d * 7, 36 + (d + 1) * 7).join('');
-                if (EAN_R[pat]) d8 += EAN_R[pat]; else { ok8 = false; break; }
+                const pat = bits8.slice(3 + d * 7, 3 + (d + 1) * 7).join('');
+                if (EAN_L[pat]) d8 += EAN_L[pat]; else { ok8 = false; break; }
               }
+              if (ok8) {
+                for (let d = 0; d < 4; d++) {
+                  const pat = bits8.slice(36 + d * 7, 36 + (d + 1) * 7).join('');
+                  if (EAN_R[pat]) d8 += EAN_R[pat]; else { ok8 = false; break; }
+                }
+              }
+              if (ok8 && isValidEAN8(d8)) return d8;
             }
-            if (ok8 && isValidEAN8(d8)) return d8;
           }
         }
       }
@@ -647,25 +727,55 @@
         const w = canvas.width, h = canvas.height;
         if (!w || !h) return null;
         const img = ctx.getImageData(0, 0, w, h).data;
-        const rowsToTest = [0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72];
+        const rowsToTest = [0.5, 0.45, 0.55, 0.4, 0.6, 0.35, 0.65, 0.3, 0.7];
 
         for (const ratio of rowsToTest) {
           const y = Math.min(h - 1, Math.max(0, Math.floor(h * ratio)));
           const lum = new Float32Array(w);
-          let sum = 0;
+          let minV = 255, maxV = 0, sum = 0;
           for (let x = 0; x < w; x++) {
             const idx = (y * w + x) * 4;
             const v = 0.299 * img[idx] + 0.587 * img[idx + 1] + 0.114 * img[idx + 2];
             lum[x] = v;
             sum += v;
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
           }
-          const avg = sum / w;
-          const row = new Uint8Array(w);
-          for (let x = 0; x < w; x++) row[x] = lum[x] < avg ? 1 : 0;
-
-          const code = decodeEANFromRow(row);
-          if (code) return code;
+          for (const th of [sum / w, (minV + maxV) / 2]) {
+            const row = new Uint8Array(w);
+            for (let x = 0; x < w; x++) row[x] = lum[x] < th ? 1 : 0;
+            const code = decodeEANFromRow(row);
+            if (code) return code;
+          }
         }
+      } catch (e) {}
+      return null;
+    }
+
+    async function decodeWithZXing(canvasOrImg) {
+      try {
+        if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) return null;
+        if (!zxingReader) {
+          const hints = new Map();
+          const formats = [
+            window.ZXing.BarcodeFormat.DATA_MATRIX,
+            window.ZXing.BarcodeFormat.QR_CODE,
+            window.ZXing.BarcodeFormat.EAN_13,
+            window.ZXing.BarcodeFormat.EAN_8,
+            window.ZXing.BarcodeFormat.CODE_128,
+            window.ZXing.BarcodeFormat.CODE_39,
+            window.ZXing.BarcodeFormat.UPC_A,
+            window.ZXing.BarcodeFormat.UPC_E,
+            window.ZXing.BarcodeFormat.ITF
+          ];
+          hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+          hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
+          zxingReader = new window.ZXing.BrowserMultiFormatReader(hints);
+        }
+        const dataUrl = canvasOrImg.tagName === 'CANVAS' ? canvasOrImg.toDataURL('image/png') : canvasOrImg.src;
+        if (!dataUrl) return null;
+        const res = await zxingReader.decodeFromImageUrl(dataUrl);
+        if (res && res.getText()) return String(res.getText()).trim();
       } catch (e) {}
       return null;
     }
@@ -673,32 +783,40 @@
     async function decodeFromImageSource(source) {
       if ('BarcodeDetector' in window) {
         try {
-          const detector = new window.BarcodeDetector({
-            formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e', 'itf']
-          });
+          const supported = typeof window.BarcodeDetector.getSupportedFormats === 'function'
+            ? await window.BarcodeDetector.getSupportedFormats()
+            : ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'data_matrix', 'upc_a', 'upc_e', 'itf'];
+          const wanted = ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'data_matrix', 'upc_a', 'upc_e', 'itf']
+            .filter(f => supported.includes(f));
+          const detector = new window.BarcodeDetector({ formats: wanted.length ? wanted : undefined });
           const codes = await detector.detect(source);
-          if (codes && codes.length && codes[0].rawValue) {
-            return String(codes[0].rawValue).trim();
-          }
+          if (codes && codes.length && codes[0].rawValue) return String(codes[0].rawValue).trim();
         } catch (e) {}
       }
 
-      const c = document.createElement('canvas');
       const sw = source.videoWidth || source.naturalWidth || source.width || 0;
       const sh = source.videoHeight || source.naturalHeight || source.height || 0;
       if (!sw || !sh) return null;
-      const targetW = Math.min(1280, sw);
+
+      const targetW = Math.min(1400, sw);
       const scale = targetW / sw;
+      const c = document.createElement('canvas');
       c.width = targetW;
       c.height = Math.max(120, Math.floor(sh * scale));
-      const ctx = c.getContext('2d');
+      const ctx = c.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(source, 0, 0, c.width, c.height);
-      return decodeBarcodeFromCanvas(c);
+
+      const localEAN = decodeBarcodeFromCanvas(c);
+      if (localEAN) return localEAN;
+      const zxingRes = await decodeWithZXing(c);
+      if (zxingRes) return zxingRes;
+      return null;
     }
 
     function completeBarcodeScan(code) {
       const clean = String(code || '').trim();
       if (!clean) return;
+      recordRecentScan(clean);
       const fn = barcodeCallback;
       closeBarcodeModal();
       if (fn) fn(clean);
@@ -706,9 +824,10 @@
 
     function openBarcodeModal(cb, hint) {
       barcodeCallback = cb;
-      document.getElementById('barcodeModalHint').textContent = hint || 'Barkod okutun, fotoğraf çekin veya barkod numarasını girin.';
+      document.getElementById('barcodeModalHint').textContent = hint || 'Barkod veya karekod okutun, fotoğraf çekin ya da numarasını girin.';
       document.getElementById('manualBarcodeInput').value = '';
       document.getElementById('photoBarcodeInput').value = '';
+      renderRecentScans();
       document.getElementById('barcodeModal').classList.remove('hidden');
       setScanStatus('Kamera hazırlanıyor...', 'text-amber');
       startCameraScan();
@@ -728,13 +847,18 @@
         });
         video.srcObject = camStream;
         await video.play().catch(() => {});
-        setScanStatus('Barkodu kırmızı çizgiye hizalayın...', 'text-green');
+        setScanStatus('Barkod veya karekodu çerçeveye hizalayın...', 'text-green');
 
         camTimer = setInterval(async () => {
-          if (!camStream || video.readyState < 2) return;
-          const found = await decodeFromImageSource(video);
-          if (found) completeBarcodeScan(found);
-        }, 450);
+          if (!camStream || video.readyState < 2 || scanBusy) return;
+          scanBusy = true;
+          try {
+            const found = await decodeFromImageSource(video);
+            if (found) completeBarcodeScan(found);
+          } finally {
+            scanBusy = false;
+          }
+        }, 500);
       } catch (e) {
         setScanStatus('Kamera açılamadı; "Fotoğraf Çek / Seç" butonuna basarak barkod çekebilirsiniz.', 'text-amber');
       }
@@ -748,10 +872,9 @@
       }
       setScanStatus('Kare taranıyor...', 'text-amber');
       const found = await decodeFromImageSource(video);
-      if (found) {
-        completeBarcodeScan(found);
-      } else {
-        setScanStatus('Karede barkod okunamadı; daha net hizalayın veya fotoğraf çekin.', 'text-red');
+      if (found) completeBarcodeScan(found);
+      else {
+        setScanStatus('Karede barkod/karekod okunamadı; daha net hizalayın veya fotoğraf çekin.', 'text-red');
         toast('Barkod okunamadı, tekrar deneyin.', 'error');
       }
     }
@@ -765,13 +888,12 @@
         const img = new Image();
         img.onload = async () => {
           const found = await decodeFromImageSource(img);
-          if (found) {
-            completeBarcodeScan(found);
-          } else {
-            setScanStatus('Fotoğrafta barkod okunamadı; numarayı aşağıya yazabilirsiniz.', 'text-red');
+          if (found) completeBarcodeScan(found);
+          else {
+            setScanStatus('Fotoğraftan kod okunamadı; numarayı aşağıya yazabilirsiniz.', 'text-red');
             const inp = document.getElementById('manualBarcodeInput');
             if (inp) inp.focus();
-            toast('Fotoğraftan barkod okunamadı; barkod numarasını manuel girebilirsiniz.', 'info');
+            toast('Kod otomatik okunamadı; numarayı manuel girebilirsiniz.', 'info');
           }
         };
         img.src = String(reader.result || '');
@@ -781,10 +903,7 @@
 
     function stopCameraScan() {
       if (camTimer) { clearInterval(camTimer); camTimer = null; }
-      if (camStream) {
-        camStream.getTracks().forEach(t => t.stop());
-        camStream = null;
-      }
+      if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
       const v = document.getElementById('barcodeVideo');
       if (v) v.srcObject = null;
     }
@@ -809,6 +928,233 @@
         }
       }
       return null;
+    }
+
+    function showQuickLookup(code) {
+      const found = findVariantByBarcode(code);
+      const wrap = document.getElementById('quickLookupModal');
+      const box = document.getElementById('quickLookupContent');
+      if (!wrap || !box) return;
+
+      if (found) {
+        const { product: p, variant: v } = found;
+        const tot = (p.variants || []).reduce((a, x) => a + Number(x.stock || 0), 0);
+        box.innerHTML = `
+          <div class="row-between">
+            <div class="title-md" style="margin:0;">Ürün Bulundu</div>
+            <button onclick="closeQuickLookup()" class="btn btn-secondary btn-sm">&times;</button>
+          </div>
+          <div class="sub-box stack">
+            <div style="font-weight:800;font-size:15px;">${esc(p.name)}</div>
+            <div class="muted">Kod: ${esc(code)} • ${esc(v.size)} / ${esc(v.color)}</div>
+            <div class="row-between" style="margin-top:4px;">
+              <span class="text-green" style="font-weight:800;">Satış: ${formatTL(p.sellPrice)}</span>
+              <span class="text-blue" style="font-weight:800;">Varyant Stok: ${v.stock} (Toplam: ${tot})</span>
+            </div>
+            ${isAdmin() ? `<div class="muted">Alış: ${formatTL(p.buyPrice)} • Birim Kâr: ${formatTL(Number(p.sellPrice) - Number(p.buyPrice))}</div>` : ''}
+          </div>
+          <div class="row-gap">
+            <button onclick="closeQuickLookup(); activeTab='pos'; render(); addToCart('${p.id}','${v.id}');" class="btn btn-success" style="flex:1;">Sepete Ekle</button>
+            ${isAdmin() ? `<button onclick="closeQuickLookup(); activeTab='products'; render(); stockMove('${p.id}','${v.id}','in');" class="btn btn-primary" style="flex:1;">+ Stok Girişi</button>` : ''}
+          </div>
+        `;
+      } else {
+        box.innerHTML = `
+          <div class="row-between">
+            <div class="title-md text-amber" style="margin:0;">Kayıtsız Barkod / Etiket</div>
+            <button onclick="closeQuickLookup()" class="btn btn-secondary btn-sm">&times;</button>
+          </div>
+          <div class="sub-box">
+            <div style="font-weight:700;">Okunan Kod: <span class="text-blue">${esc(code)}</span></div>
+            <div class="muted" style="margin-top:4px;">Bu kod şu an stokta tanımlı değil.</div>
+          </div>
+          <div class="row-gap">
+            ${isAdmin() ? `<button onclick="closeQuickLookup(); activeTab='products'; render(); openNewProductWithBarcode('${esc(code)}');" class="btn btn-primary" style="flex:1;">Yeni Ürün Olarak Ekle</button>` : ''}
+            <button onclick="closeQuickLookup()" class="btn btn-secondary" style="flex:1;">Kapat</button>
+          </div>
+        `;
+      }
+      wrap.classList.remove('hidden');
+    }
+
+    function closeQuickLookup() {
+      document.getElementById('quickLookupModal').classList.add('hidden');
+    }
+
+    /* ================= GÜN SONU Z RAPORU / KASA ÖZETİ ================= */
+    function buildZReportData(dateStr) {
+      const key = dateStr || zReportDate || toLocalDateKey(new Date());
+      const daySales = state.sales.filter(s => s.status !== 'cancelled' && toLocalDateKey(s.createdAt) === key);
+      const cancelledDaySales = state.sales.filter(s => s.status === 'cancelled' && toLocalDateKey(s.createdAt) === key);
+
+      const breakdown = {
+        nakit: 0,
+        kredi_karti: 0,
+        iban: 0,
+        veresiye: 0
+      };
+      const counts = {
+        nakit: 0,
+        kredi_karti: 0,
+        iban: 0,
+        veresiye: 0
+      };
+
+      let grossTotal = 0;
+      let totalDiscount = 0;
+      let totalItems = 0;
+
+      daySales.forEach(s => {
+        const m = breakdown[s.paymentMethod] !== undefined ? s.paymentMethod : 'nakit';
+        const amt = Number(s.total || 0);
+        breakdown[m] += amt;
+        counts[m] += 1;
+        grossTotal += amt;
+        totalDiscount += Number(s.discountAmount || 0);
+        totalItems += (s.items || []).reduce((acc, it) => acc + Number(it.qty || 0), 0);
+      });
+
+      const dayCollections = state.transactions.filter(t => t.type === 'payment' && !t.isReversed && toLocalDateKey(t.createdAt) === key);
+      const colNakit = dayCollections.filter(t => t.method === 'nakit').reduce((a, t) => a + Number(t.amount || 0), 0);
+      const colIban = dayCollections.filter(t => t.method === 'iban').reduce((a, t) => a + Number(t.amount || 0), 0);
+      const totalCollections = colNakit + colIban;
+
+      const dayExpenses = state.expenses.filter(e => !e.isDeleted && e.date === key).reduce((a, e) => a + Number(e.amount || 0), 0);
+      const cashInDrawer = breakdown.nakit + colNakit - dayExpenses;
+
+      return {
+        key,
+        saleCount: daySales.length,
+        cancelledCount: cancelledDaySales.length,
+        totalItems,
+        grossTotal,
+        totalDiscount,
+        breakdown,
+        counts,
+        colNakit,
+        colIban,
+        totalCollections,
+        dayExpenses,
+        cashInDrawer
+      };
+    }
+
+    function openZReportModal(dateStr) {
+      if (dateStr) zReportDate = dateStr;
+      const d = buildZReportData(zReportDate);
+      const wrap = document.getElementById('zReportModal');
+      const box = document.getElementById('zReportContent');
+      if (!wrap || !box) return;
+
+      box.innerHTML = `
+        <div class="row-between">
+          <div>
+            <div class="title-md" style="margin:0;">Gün Sonu Z Raporu / Kasa Özeti</div>
+            <div class="muted">${esc(state.settings.storeName)} • ${esc(d.key)}</div>
+          </div>
+          <button onclick="closeZReportModal()" class="btn btn-secondary btn-sm">&times;</button>
+        </div>
+
+        <div class="row-gap no-print">
+          <input type="date" value="${esc(d.key)}" onchange="openZReportModal(this.value)" class="input" style="flex:1;" />
+          <button onclick="window.print()" class="btn btn-primary btn-sm">Yazdır / PDF</button>
+        </div>
+
+        <div class="grid-2">
+          <div class="sub-box" style="margin-top:0;">
+            <div class="muted">Nakit Satış (${d.counts.nakit})</div>
+            <div class="val-lg text-green">${formatTL(d.breakdown.nakit)}</div>
+          </div>
+          <div class="sub-box" style="margin-top:0;">
+            <div class="muted">Kredi Kartı (${d.counts.kredi_karti})</div>
+            <div class="val-lg text-blue">${formatTL(d.breakdown.kredi_karti)}</div>
+          </div>
+          <div class="sub-box" style="margin-top:0;">
+            <div class="muted">IBAN / Havale (${d.counts.iban})</div>
+            <div class="val-lg text-white">${formatTL(d.breakdown.iban)}</div>
+          </div>
+          <div class="sub-box" style="margin-top:0;">
+            <div class="muted">Veresiye Satış (${d.counts.veresiye})</div>
+            <div class="val-lg text-amber">${formatTL(d.breakdown.veresiye)}</div>
+          </div>
+        </div>
+
+        <div class="sub-box stack">
+          <div class="row-between"><span class="muted">İşlem / Satılan Adet</span><strong>${d.saleCount} Satış • ${d.totalItems} Adet</strong></div>
+          <div class="row-between"><span class="muted">Veresiye Tahsilat (Nakit/IBAN)</span><strong class="text-green">+${formatTL(d.totalCollections)}</strong></div>
+          ${isAdmin() ? `<div class="row-between"><span class="muted">Günlük Giderler</span><strong class="text-red">-${formatTL(d.dayExpenses)}</strong></div>` : ''}
+          <div class="row-between"><span class="muted">İptal Edilen Satış</span><strong>${d.cancelledCount} Adet</strong></div>
+          <div class="row-between" style="font-size:16px;font-weight:800;padding-top:6px;border-top:1px solid var(--border);">
+            <span>Günlük Toplam Satış</span>
+            <span class="text-green">${formatTL(d.grossTotal)}</span>
+          </div>
+          <div class="row-between" style="font-size:15px;font-weight:800;">
+            <span>Tahmini Kasa Nakdi</span>
+            <span class="text-blue">${formatTL(d.cashInDrawer)}</span>
+          </div>
+        </div>
+
+        <button onclick="closeZReportModal()" class="btn btn-secondary btn-block no-print">Kapat</button>
+      `;
+      wrap.classList.remove('hidden');
+    }
+
+    function closeZReportModal() {
+      document.getElementById('zReportModal').classList.add('hidden');
+    }
+
+    /* ================= GÜN VE HAFTA BAZLI SATIŞ RAPORU ================= */
+    function getMonthDayAndWeekReport(year, month) {
+      const daysInMonth = new Date(year, month, 0).getDate();
+      const activeSales = state.sales.filter(s => {
+        if (s.status === 'cancelled') return false;
+        const d = new Date(s.createdAt);
+        return d.getFullYear() === Number(year) && (d.getMonth() + 1) === Number(month);
+      });
+
+      const dayMap = {};
+      for (let day = 1; day <= daysInMonth; day++) {
+        dayMap[day] = { day, count: 0, qty: 0, total: 0, nakit: 0, kart: 0, iban: 0, veresiye: 0 };
+      }
+
+      const weeks = [
+        { weekNo: 1, label: '1. Hafta (1–7)', range: '1 - 7', count: 0, qty: 0, total: 0 },
+        { weekNo: 2, label: '2. Hafta (8–14)', range: '8 - 14', count: 0, qty: 0, total: 0 },
+        { weekNo: 3, label: '3. Hafta (15–21)', range: '15 - 21', count: 0, qty: 0, total: 0 },
+        { weekNo: 4, label: '4. Hafta (22–28)', range: '22 - 28', count: 0, qty: 0, total: 0 },
+        { weekNo: 5, label: `5. Hafta (29–${daysInMonth})`, range: `29 - ${daysInMonth}`, count: 0, qty: 0, total: 0 }
+      ];
+
+      let monthTotal = 0;
+      let monthQty = 0;
+      let monthCount = 0;
+
+      activeSales.forEach(s => {
+        const d = new Date(s.createdAt);
+        const day = d.getDate();
+        const wIdx = Math.min(4, Math.floor((day - 1) / 7));
+        const amt = Number(s.total || 0);
+        const qty = (s.items || []).reduce((a, it) => a + Number(it.qty || 0), 0);
+
+        dayMap[day].count += 1;
+        dayMap[day].qty += qty;
+        dayMap[day].total += amt;
+        if (s.paymentMethod === 'nakit') dayMap[day].nakit += amt;
+        else if (s.paymentMethod === 'kredi_karti') dayMap[day].kart += amt;
+        else if (s.paymentMethod === 'iban') dayMap[day].iban += amt;
+        else if (s.paymentMethod === 'veresiye') dayMap[day].veresiye += amt;
+
+        weeks[wIdx].count += 1;
+        weeks[wIdx].qty += qty;
+        weeks[wIdx].total += amt;
+
+        monthTotal += amt;
+        monthQty += qty;
+        monthCount += 1;
+      });
+
+      const activeWeeks = daysInMonth > 28 ? weeks : weeks.slice(0, 4);
+      return { days: Object.values(dayMap), weeks: activeWeeks, monthTotal, monthQty, monthCount };
     }
 
     function getActiveSales() { return state.sales.filter(s => s.status !== 'cancelled'); }
@@ -938,7 +1284,8 @@
             </div>
           </div>
           <div class="row-gap">
-            <button onclick="openBarcodeModal(onTopScan, 'Hızlı barkod okutma')" class="btn btn-warning btn-sm">Barkod</button>
+            <button onclick="openZReportModal(toLocalDateKey(new Date()))" class="btn btn-success btn-sm">Z Raporu</button>
+            <button onclick="openBarcodeModal(onTopScan, 'Barkod / karekod ile hızlı ürün sorgu')" class="btn btn-warning btn-sm">Barkod</button>
             <button onclick="doLogout()" class="btn btn-secondary btn-sm">Çıkış</button>
           </div>
         </header>
@@ -949,7 +1296,7 @@
           <button onclick="goTab('products')" class="pill-btn ${activeTab==='products'?'active':''}">Stok</button>
           <button onclick="goTab('customers')" class="pill-btn ${activeTab==='customers'?'active':''}">Veresiye</button>
           ${isAdmin() ? `<button onclick="goTab('expenses')" class="pill-btn ${activeTab==='expenses'?'active':''}">Giderler</button>` : ''}
-          ${isAdmin() ? `<button onclick="goTab('reports')" class="pill-btn ${activeTab==='reports'?'active':''}">Kâr & Finans</button>` : ''}
+          ${isAdmin() ? `<button onclick="goTab('reports')" class="pill-btn ${activeTab==='reports'?'active':''}">Raporlar & Kâr</button>` : ''}
           ${isAdmin() ? `<button onclick="goTab('history')" class="pill-btn ${activeTab==='history'?'active':''}">Satış & İşlem</button>` : ''}
           ${isAdmin() ? `<button onclick="goTab('settings')" class="pill-btn ${activeTab==='settings'?'active':''}">Ayarlar</button>` : ''}
         </div>
@@ -973,8 +1320,8 @@
           <button onclick="goTab('customers')" class="nav-item ${activeTab==='customers'?'active':''}">
             <span>Veresiye</span>
           </button>
-          <button onclick="goTab('${isAdmin()?'settings':'dashboard'}')" class="nav-item ${activeTab==='settings'?'active':''}">
-            <span>${isAdmin()?'Ayarlar':'Bilgi'}</span>
+          <button onclick="goTab('${isAdmin()?'reports':'dashboard'}')" class="nav-item ${activeTab==='reports'?'active':''}">
+            <span>${isAdmin()?'Rapor':'Bilgi'}</span>
           </button>
         </nav>
       `;
@@ -982,18 +1329,7 @@
     }
 
     function onTopScan(code) {
-      const found = findVariantByBarcode(code);
-      if (found) {
-        activeTab = 'pos';
-        render();
-        addToCart(found.product.id, found.variant.id);
-      } else if (isAdmin()) {
-        activeTab = 'products';
-        render();
-        openNewProductWithBarcode(code);
-      } else {
-        toast('Barkod bulunamadı: ' + code, 'error');
-      }
+      showQuickLookup(code);
     }
 
     function openNewProductWithBarcode(code) {
@@ -1004,7 +1340,7 @@
         inp.value = code;
         inp.focus();
       }
-      toast('Barkod okundu: ' + code + ' — Ürün bilgilerini girip Kaydet\'e basın.', 'success');
+      toast('Kod eklendi: ' + code + ' — Ürün bilgilerini girip Kaydet\'e basın.', 'success');
     }
 
     function renderView() {
@@ -1028,11 +1364,15 @@
       const monthRev = sales.filter(s => isWithinDays(s.createdAt, 30)).reduce((a, s) => a + Number(s.total || 0), 0);
       const fin = getFinance();
       const crits = getCriticalItems();
+      const zToday = buildZReportData(toLocalDateKey(new Date()));
 
       return `
         <div class="row-between">
           <h2 class="title-lg">Mağaza Özeti</h2>
-          <button onclick="goTab('pos')" class="btn btn-success btn-sm">+ Yeni Satış</button>
+          <div class="row-gap">
+            <button onclick="openZReportModal(toLocalDateKey(new Date()))" class="btn btn-primary btn-sm">Gün Sonu Z Raporu</button>
+            <button onclick="goTab('pos')" class="btn btn-success btn-sm">+ Yeni Satış</button>
+          </div>
         </div>
 
         <div class="grid-4">
@@ -1040,6 +1380,19 @@
           <div class="card"><div class="muted">Günlük Adet</div><div class="val-lg text-white">${todayQty} Adet</div></div>
           <div class="card"><div class="muted">Haftalık Satış</div><div class="val-lg text-blue">${formatTL(weekRev)}</div></div>
           <div class="card"><div class="muted">Aylık Satış</div><div class="val-lg text-amber">${formatTL(monthRev)}</div></div>
+        </div>
+
+        <div class="card stack">
+          <div class="row-between">
+            <div class="title-md" style="margin:0;">Bugünkü Kasa Kırılımı</div>
+            <button onclick="openZReportModal(toLocalDateKey(new Date()))" class="btn btn-secondary btn-sm">Detaylı Z Raporu</button>
+          </div>
+          <div class="grid-4">
+            <div class="sub-box" style="margin-top:0;"><div class="muted">Nakit</div><div class="val-lg text-green">${formatTL(zToday.breakdown.nakit)}</div></div>
+            <div class="sub-box" style="margin-top:0;"><div class="muted">Kredi Kartı</div><div class="val-lg text-blue">${formatTL(zToday.breakdown.kredi_karti)}</div></div>
+            <div class="sub-box" style="margin-top:0;"><div class="muted">IBAN</div><div class="val-lg text-white">${formatTL(zToday.breakdown.iban)}</div></div>
+            <div class="sub-box" style="margin-top:0;"><div class="muted">Veresiye</div><div class="val-lg text-amber">${formatTL(zToday.breakdown.veresiye)}</div></div>
+          </div>
         </div>
 
         <div class="grid-4">
@@ -1077,7 +1430,7 @@
         <div class="row-between">
           <h2 class="title-lg">Ürün ve Stok Yönetimi</h2>
           <div class="row-gap">
-            <button onclick="openBarcodeModal(c=>{ const el=document.getElementById('prodSearch'); if(el){el.value=c; drawProductRows();} }, 'Barkod ile ürün bul')" class="btn btn-warning btn-sm">Barkod Ara</button>
+            <button onclick="openBarcodeModal(c=>{ const el=document.getElementById('prodSearch'); if(el){el.value=c; drawProductRows();} }, 'Barkod veya karekod ile ürün bul')" class="btn btn-warning btn-sm">Barkod Ara</button>
             ${admin ? `<button onclick="document.getElementById('newProdBox').classList.toggle('hidden')" class="btn btn-primary btn-sm">+ Yeni Ürün</button>` : ''}
           </div>
         </div>
@@ -1097,10 +1450,10 @@
               <div><label class="lbl">Beden</label><input id="pSize" type="text" class="input" placeholder="L" /></div>
               <div><label class="lbl">Renk</label><input id="pColor" type="text" class="input" placeholder="Siyah" /></div>
               <div>
-                <label class="lbl">Barkod</label>
+                <label class="lbl">Barkod / Etiket Kodu</label>
                 <div class="row-gap">
                   <input id="pBarcode" type="text" class="input" style="flex:1;" placeholder="Barkod" />
-                  <button type="button" onclick="openBarcodeModal(c=>{ const el=document.getElementById('pBarcode'); if(el) el.value=c; toast('Barkod eklendi: '+c, 'success'); }, 'Ürün barkodu okut')" class="btn btn-warning btn-sm">Okut</button>
+                  <button type="button" onclick="openBarcodeModal(c=>{ const el=document.getElementById('pBarcode'); if(el) el.value=c; toast('Kod eklendi: '+c, 'success'); }, 'Ürün barkodu veya karekodu okut')" class="btn btn-warning btn-sm">Okut</button>
                 </div>
               </div>
               <div><label class="lbl">Stok Adedi</label><input id="pStock" type="number" class="input" value="1" /></div>
@@ -1298,7 +1651,10 @@
       return `
         <div class="row-between">
           <h2 class="title-lg">Satış Ekranı</h2>
-          <button onclick="openBarcodeModal(c=>{ const f=findVariantByBarcode(c); if(!f) toast('Barkod bulunamadı: '+c,'error'); else addToCart(f.product.id,f.variant.id); }, 'Satış barkodu okut')" class="btn btn-warning btn-sm">Barkod Okut</button>
+          <div class="row-gap">
+            <button onclick="openZReportModal(toLocalDateKey(new Date()))" class="btn btn-secondary btn-sm">Gün Sonu Z</button>
+            <button onclick="openBarcodeModal(c=>{ const f=findVariantByBarcode(c); if(!f) toast('Barkod bulunamadı: '+c,'error'); else addToCart(f.product.id,f.variant.id); }, 'Satış barkodu veya karekodu okut')" class="btn btn-warning btn-sm">Barkod Okut</button>
+          </div>
         </div>
 
         <div class="pos-layout">
@@ -1559,7 +1915,7 @@
           <div class="grid-4">
             <select id="expCat" class="input"><option>Kira</option><option>Elektrik ve Su</option><option>Personel Gideri</option><option>İşletme Gideri</option><option>Diğer</option></select>
             <input id="expAmt" type="number" step="0.01" placeholder="Tutar (TL)" class="input" />
-            <input id="expDate" type="date" value="${new Date().toISOString().slice(0,10)}" class="input" />
+            <input id="expDate" type="date" value="${toLocalDateKey(new Date())}" class="input" />
             <input id="expNote" type="text" placeholder="Açıklama" class="input" />
           </div>
           <button onclick="addExp()" class="btn btn-danger btn-sm">Gider Ekle</button>
@@ -1615,13 +1971,93 @@
       const dRev = sales.filter(s => isSameDay(s.createdAt)).reduce((a, s) => a + Number(s.total || 0), 0);
       const wRev = sales.filter(s => isWithinDays(s.createdAt, 7)).reduce((a, s) => a + Number(s.total || 0), 0);
       const mRev = sales.filter(s => isWithinDays(s.createdAt, 30)).reduce((a, s) => a + Number(s.total || 0), 0);
+      const mRep = getMonthDayAndWeekReport(reportYear, reportMonth);
+
+      const monthNames = ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
+      const years = [reportYear - 1, reportYear, reportYear + 1];
 
       return `
-        <h2 class="title-lg">Kâr ve Finans Raporları</h2>
+        <div class="row-between">
+          <h2 class="title-lg">Raporlar, Gün/Hafta Analizi & Kâr</h2>
+          <button onclick="openZReportModal(toLocalDateKey(new Date()))" class="btn btn-success btn-sm">Gün Sonu Z Raporu</button>
+        </div>
+
+        <!-- Ayın Hafta ve Gün Bazlı Satış Raporu -->
+        <div class="card stack">
+          <div class="row-between">
+            <div>
+              <div class="title-md" style="margin:0;">Haftalık ve Günlük Satış Raporu</div>
+              <div class="muted">Seçilen ayın hangi haftasında ve hangi gününde ne kadar satış yapıldığını görün.</div>
+            </div>
+            <div class="row-gap">
+              <select class="input" style="width:130px;" onchange="reportMonth=Number(this.value); render();">
+                ${monthNames.map((mName, idx) => `<option value="${idx+1}" ${reportMonth===idx+1?'selected':''}>${mName}</option>`).join('')}
+              </select>
+              <select class="input" style="width:100px;" onchange="reportYear=Number(this.value); render();">
+                ${years.map(y => `<option value="${y}" ${reportYear===y?'selected':''}>${y}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+
+          <div class="grid-3">
+            <div class="sub-box" style="margin-top:0;"><div class="muted">${monthNames[reportMonth-1]} ${reportYear} Toplam Satış</div><div class="val-lg text-green">${formatTL(mRep.monthTotal)}</div></div>
+            <div class="sub-box" style="margin-top:0;"><div class="muted">Toplam İşlem</div><div class="val-lg text-blue">${mRep.monthCount} Satış</div></div>
+            <div class="sub-box" style="margin-top:0;"><div class="muted">Toplam Satılan Adet</div><div class="val-lg text-amber">${mRep.monthQty} Adet</div></div>
+          </div>
+
+          <div class="title-md" style="margin-top:6px;">Haftalık Satış Kırılımı</div>
+          <div class="grid-2">
+            ${mRep.weeks.map(w => `
+              <div class="sub-box" style="margin-top:0;">
+                <div class="row-between">
+                  <strong>${esc(w.label)}</strong>
+                  <span class="muted">${w.count} satış • ${w.qty} adet</span>
+                </div>
+                <div class="val-lg text-green">${formatTL(w.total)}</div>
+              </div>
+            `).join('')}
+          </div>
+
+          <div class="title-md" style="margin-top:6px;">Günlük Satış Kırılımı (1–${mRep.days.length})</div>
+          <div class="table-wrap">
+            <table class="rep-table">
+              <thead>
+                <tr>
+                  <th>Gün</th>
+                  <th>Satış</th>
+                  <th>Adet</th>
+                  <th>Nakit</th>
+                  <th>Kart</th>
+                  <th>IBAN</th>
+                  <th>Veresiye</th>
+                  <th>Günlük Toplam</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${mRep.days.map(d => {
+                  const dateKey = `${reportYear}-${String(reportMonth).padStart(2,'0')}-${String(d.day).padStart(2,'0')}`;
+                  return `
+                    <tr>
+                      <td><strong>${d.day} ${esc(monthNames[reportMonth-1].slice(0,3))}</strong> <button onclick="openZReportModal('${dateKey}')" class="chip" style="margin-left:4px;">Z</button></td>
+                      <td>${d.count}</td>
+                      <td>${d.qty}</td>
+                      <td>${formatTL(d.nakit)}</td>
+                      <td>${formatTL(d.kart)}</td>
+                      <td>${formatTL(d.iban)}</td>
+                      <td>${formatTL(d.veresiye)}</td>
+                      <td><strong class="${d.total>0?'text-green':'muted'}">${formatTL(d.total)}</strong></td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="grid-3">
-          <div class="card"><div class="muted">Günlük Ciro</div><div class="val-lg text-green">${formatTL(dRev)}</div></div>
-          <div class="card"><div class="muted">Haftalık Ciro</div><div class="val-lg text-blue">${formatTL(wRev)}</div></div>
-          <div class="card"><div class="muted">Aylık Ciro</div><div class="val-lg text-amber">${formatTL(mRev)}</div></div>
+          <div class="card"><div class="muted">Bugünkü Ciro</div><div class="val-lg text-green">${formatTL(dRev)}</div></div>
+          <div class="card"><div class="muted">Son 7 Gün Ciro</div><div class="val-lg text-blue">${formatTL(wRev)}</div></div>
+          <div class="card"><div class="muted">Son 30 Gün Ciro</div><div class="val-lg text-amber">${formatTL(mRev)}</div></div>
         </div>
         <div class="grid-4">
           <div class="card"><div class="muted">Satış Geliri</div><div class="val-lg text-white">${formatTL(fin.revenue)}</div></div>
@@ -1644,7 +2080,7 @@
 
     function viewHistory() {
       return `
-        <h2 class="title-lg">Satış Geçmişi, İptal ve İşlem Kayıtları</h2>
+        <h2 class="title-lg">Satış Geçmişi, İptal, Silme ve İşlem Kayıtları</h2>
         <div class="card stack">
           <div class="title-md">Satışlar (${state.sales.length})</div>
           ${state.sales.length ? state.sales.map(s => {
@@ -1655,7 +2091,8 @@
                   <div><strong>#${esc(s.id.slice(-5))}</strong> <span class="muted">${formatDT(s.createdAt)}</span> <span class="badge" style="background:${c?'#dc2626':'#059669'};">${c?'İPTAL':'TAMAM'}</span></div>
                   <div class="row-gap">
                     <strong>${formatTL(s.total)} (${s.paymentMethod})</strong>
-                    ${!c ? `<button onclick="cancelSale('${s.id}')" class="btn btn-danger btn-sm">İptal Et</button>` : ''}
+                    ${!c ? `<button onclick="cancelSale('${s.id}')" class="btn btn-warning btn-sm">İptal Et</button>` : ''}
+                    <button onclick="deleteSale('${s.id}')" class="btn btn-danger btn-sm">Sil</button>
                   </div>
                 </div>
                 <div class="muted" style="margin-top:4px;">${(s.items||[]).map(i=>`${esc(i.productName)} x${i.qty}`).join(', ')} • ${esc(s.userName)}</div>
@@ -1676,17 +2113,18 @@
       `;
     }
 
-    function cancelSale(sid) {
-      if (!isAdmin()) return;
-      const s = state.sales.find(x => x.id === sid);
-      if (!s || s.status === 'cancelled' || s.stockRestored) return toast('Bu satış zaten iptal edilmiş!', 'error');
-      if (!confirm('Satış iptal edilsin ve stoklar geri eklensin mi?')) return;
+    function restoreSaleEffects(s) {
+      if (!s || s.stockRestored) return;
       (s.items || []).forEach(it => {
         const p = state.products.find(x => x.id === it.productId);
         const v = p?.variants?.find(x => x.id === it.variantId);
         if (v) {
           v.stock = Number(v.stock || 0) + Number(it.qty || 0);
-          state.stockMovements.unshift({ id: uid('stk'), productId: p.id, productName: p.name, variantInfo: `${v.size}/${v.color}`, type: 'return', qtyChange: Number(it.qty || 0), reason: `Satış iptali #${s.id.slice(-5)}`, userName: currentUser.name, createdAt: nowISO() });
+          state.stockMovements.unshift({
+            id: uid('stk'), productId: p.id, productName: p.name, variantInfo: `${v.size}/${v.color}`,
+            type: 'return', qtyChange: Number(it.qty || 0), reason: `Satış geri alma #${s.id.slice(-5)}`,
+            userName: currentUser ? currentUser.name : 'Sistem', createdAt: nowISO()
+          });
         }
       });
       if (s.paymentMethod === 'veresiye' && s.customerId) {
@@ -1694,9 +2132,32 @@
         if (cust) cust.balance = Math.max(0, Number(cust.balance || 0) - Number(s.total || 0));
         state.transactions.forEach(t => { if (t.saleId === s.id && t.type === 'debt') t.isReversed = true; });
       }
-      s.status = 'cancelled'; s.stockRestored = true;
+      s.stockRestored = true;
+    }
+
+    function cancelSale(sid) {
+      if (!isAdmin()) return;
+      const s = state.sales.find(x => x.id === sid);
+      if (!s || s.status === 'cancelled' || s.stockRestored) return toast('Bu satış zaten iptal edilmiş!', 'error');
+      if (!confirm('Satış iptal edilsin ve stoklar geri eklensin mi?')) return;
+      restoreSaleEffects(s);
+      s.status = 'cancelled';
       logAction('Satış İptal Edildi', `#${s.id.slice(-5)}`);
       saveState(); render(); toast('Satış iptal edildi.', 'success');
+    }
+
+    async function deleteSale(sid) {
+      const ok = await requestPin('Satış Silme Onayı', 'Satış kaydını kalıcı olarak silmek için yönetici PIN girin.');
+      if (!ok) return;
+      const s = state.sales.find(x => x.id === sid);
+      if (!s) return;
+      const restoreStock = (s.status !== 'cancelled' && !s.stockRestored)
+        ? confirm(`#${s.id.slice(-5)} satışını silerken ürün stokları ve veresiye borcu geri alınsın mı?`)
+        : false;
+      if (restoreStock) restoreSaleEffects(s);
+      state.sales = state.sales.filter(x => x.id !== sid);
+      logAction('Satış Silindi', `#${s.id.slice(-5)} • ${formatTL(s.total)}${restoreStock ? ' (Stok/Borç geri alındı)' : ''}`);
+      saveState(); render(); toast('Satış kaydı silindi.', 'success');
     }
 
     function viewSettings() {
@@ -1779,7 +2240,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `dogu-store-${new Date().toISOString().slice(0,10)}.json`;
+      a.download = `dogu-store-${toLocalDateKey(new Date())}.json`;
       a.click();
       URL.revokeObjectURL(url);
       toast('Yedek indirildi.', 'success');
