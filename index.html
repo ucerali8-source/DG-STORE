@@ -9,25 +9,15 @@
   <title>DOĞU STORE — Mağaza Yönetim Sistemi</title>
   <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
   <script type="module">
-    import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-    import {
-      getFirestore,
-      doc,
-      setDoc,
-      getDoc,
-      onSnapshot
-    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-    window.__FIREBASE_SDK__ = {
-      initializeApp,
-      getApps,
-      getFirestore,
-      doc,
-      setDoc,
-      getDoc,
-      onSnapshot
-    };
-    window.dispatchEvent(new Event("firebase-sdk-ready"));
+    const SUPABASE_URL = "https://lrzrlghlahbdkocunlvv.supabase.co";
+    const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_SgCiYxkwDWZditHwjI4w_g_RQF5dncE";
+    const SYNC_TABLE = "store_sync";
+
+    window.__SUPABASE_CLIENT__ = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+    window.__SUPABASE_SYNC_TABLE__ = SYNC_TABLE;
+    window.dispatchEvent(new Event("supabase-sdk-ready"));
   </script>
   <style>
     :root {
@@ -448,7 +438,7 @@
 
   <script>
     const STORAGE_KEY = 'DOGU_STORE_V4_DATA';
-    const FB_CONFIG_KEY = 'DOGU_STORE_FIREBASE_CONFIG';
+    const SUPA_SYNC_CFG_KEY = 'DOGU_STORE_SUPABASE_CONFIG';
 
     function uid(p='id') {
       return p + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
@@ -529,30 +519,25 @@
       }
     }
 
-    function loadFirebaseConfig() {
+    function loadSupabaseSyncConfig() {
       try {
-        const raw = localStorage.getItem(FB_CONFIG_KEY);
-        if (!raw) return { apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', storeDocId: 'dogu_store_main' };
+        const raw = localStorage.getItem(SUPA_SYNC_CFG_KEY);
+        if (!raw) return { storeRowId: 'dogu_store_main', enabled: true };
         const p = JSON.parse(raw);
         return {
-          apiKey: p.apiKey || '',
-          authDomain: p.authDomain || '',
-          projectId: p.projectId || '',
-          storageBucket: p.storageBucket || '',
-          messagingSenderId: p.messagingSenderId || '',
-          appId: p.appId || '',
-          storeDocId: (p.storeDocId || 'dogu_store_main').trim() || 'dogu_store_main'
+          storeRowId: (p.storeRowId || 'dogu_store_main').trim() || 'dogu_store_main',
+          enabled: p.enabled !== false
         };
       } catch (e) {
-        return { apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', storeDocId: 'dogu_store_main' };
+        return { storeRowId: 'dogu_store_main', enabled: true };
       }
     }
 
     let state = loadState();
-    let fbConfig = loadFirebaseConfig();
-    let fbDb = null;
-    let fbUnsub = null;
-    let fbStatusText = 'Yerel Mod (Firebase Bağlı Değil)';
+    let supaSyncCfg = loadSupabaseSyncConfig();
+    let supaChannel = null;
+    let supaPollTimer = null;
+    let cloudStatusText = 'Supabase Bağlanıyor...';
     let applyingRemote = false;
 
     let currentUser = null;
@@ -573,124 +558,161 @@
     let reportYear = nowInit.getFullYear();
     let reportMonth = nowInit.getMonth() + 1;
 
-    function hasValidFirebaseConfig(cfg = fbConfig) {
-      return Boolean(cfg && String(cfg.apiKey || '').trim() && String(cfg.projectId || '').trim());
+    function isCloudSyncEnabled(cfg = supaSyncCfg) {
+      return Boolean(cfg && cfg.enabled !== false && window.__SUPABASE_CLIENT__);
     }
 
-    function getStoreDocRef() {
-      const sdk = window.__FIREBASE_SDK__;
-      if (!sdk || !fbDb) return null;
-      return sdk.doc(fbDb, 'stores', fbConfig.storeDocId || 'dogu_store_main');
+    function applyRemoteSnapshot(remotePayloadObj) {
+      if (!remotePayloadObj) return false;
+      const remoteState = normalizeState(remotePayloadObj.data || remotePayloadObj);
+      const remoteTime = new Date(remoteState.updatedAt || 0).getTime();
+      const localTime = new Date(state.updatedAt || 0).getTime();
+      if (remoteTime > localTime) {
+        applyingRemote = true;
+        state = remoteState;
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+        if (currentUser) {
+          currentUser = state.users.find(u => u.id === currentUser.id) || currentUser;
+        }
+        applyingRemote = false;
+        return true;
+      }
+      return false;
     }
 
     async function pushStateToCloud(silent=true) {
-      const sdk = window.__FIREBASE_SDK__;
-      const ref = getStoreDocRef();
-      if (!sdk || !ref || applyingRemote) return;
+      const client = window.__SUPABASE_CLIENT__;
+      const tableName = window.__SUPABASE_SYNC_TABLE__ || 'store_sync';
+      if (!client || !supaSyncCfg.enabled || applyingRemote) return;
       try {
-        await sdk.setDoc(ref, {
-          data: state,
-          updatedAt: state.updatedAt || nowISO()
-        });
-        fbStatusText = 'Bağlı (Canlı Eşitleniyor)';
-        if (!silent) toast('Veriler buluta kaydedildi.', 'success');
+        const rowId = (supaSyncCfg.storeRowId || 'dogu_store_main').trim() || 'dogu_store_main';
+        const stamp = state.updatedAt || nowISO();
+        const { error } = await client
+          .from(tableName)
+          .upsert({
+            id: rowId,
+            payload: {
+              data: state,
+              updatedAt: stamp
+            },
+            updated_at: stamp
+          }, { onConflict: 'id' });
+
+        if (error) throw error;
+        cloudStatusText = 'Supabase Bağlı (Canlı)';
+        if (!silent) toast('Veriler Supabase bulutuna kaydedildi.', 'success');
       } catch (e) {
-        fbStatusText = 'Bulut Yazma Hatası';
-        if (!silent) toast('Buluta yazılamadı: ' + (e.message || 'Yetki/Bağlantı hatası'), 'error');
+        cloudStatusText = 'Supabase Yazma Hatası';
+        if (!silent) toast('Buluta yazılamadı: ' + (e.message || 'Bağlantı/RLS hatası'), 'error');
       }
     }
 
-    async function initFirebaseSync() {
-      if (fbUnsub) {
-        try { fbUnsub(); } catch (e) {}
-        fbUnsub = null;
-      }
-      fbDb = null;
-
-      if (!hasValidFirebaseConfig(fbConfig)) {
-        fbStatusText = 'Yerel Mod (Firebase Ayarlanmadı)';
-        return;
-      }
-
-      const sdk = window.__FIREBASE_SDK__;
-      if (!sdk) {
-        fbStatusText = 'Firebase SDK Yükleniyor...';
-        return;
-      }
-
+    async function pullAndSyncFromCloud() {
+      const client = window.__SUPABASE_CLIENT__;
+      const tableName = window.__SUPABASE_SYNC_TABLE__ || 'store_sync';
+      if (!client || !supaSyncCfg.enabled) return;
       try {
-        const appName = 'dogu_store_' + fbConfig.projectId;
-        const existing = sdk.getApps().find(a => a.name === appName);
-        const app = existing || sdk.initializeApp({
-          apiKey: fbConfig.apiKey.trim(),
-          authDomain: (fbConfig.authDomain || `${fbConfig.projectId}.firebaseapp.com`).trim(),
-          projectId: fbConfig.projectId.trim(),
-          storageBucket: (fbConfig.storageBucket || `${fbConfig.projectId}.appspot.com`).trim(),
-          messagingSenderId: (fbConfig.messagingSenderId || '').trim(),
-          appId: (fbConfig.appId || '').trim()
-        }, appName);
+        const rowId = (supaSyncCfg.storeRowId || 'dogu_store_main').trim() || 'dogu_store_main';
+        const { data, error } = await client
+          .from(tableName)
+          .select('id, payload, updated_at')
+          .eq('id', rowId)
+          .maybeSingle();
 
-        fbDb = sdk.getFirestore(app);
-        const ref = getStoreDocRef();
-        fbStatusText = 'Bağlı (Canlı Eşitleniyor)';
+        if (error) throw error;
+        cloudStatusText = 'Supabase Bağlı (Canlı)';
 
-        const snap = await sdk.getDoc(ref);
-        if (snap.exists()) {
-          const remotePayload = snap.data();
-          const remoteState = normalizeState(remotePayload?.data || remotePayload);
-          const remoteTime = new Date(remoteState.updatedAt || 0).getTime();
+        if (data && data.payload) {
+          const remoteState = normalizeState(data.payload.data || data.payload);
+          const remoteTime = new Date(remoteState.updatedAt || data.updated_at || 0).getTime();
           const localTime = new Date(state.updatedAt || 0).getTime();
+          const localHasData = Boolean(state.products.length || state.sales.length || state.customers.length || state.expenses.length);
 
-          if (remoteTime > localTime || (!state.products.length && !state.sales.length && !state.customers.length)) {
+          if (remoteTime > localTime || (!localHasData && remoteTime >= localTime)) {
             applyingRemote = true;
             state = remoteState;
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-            applyingRemote = false;
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
             if (currentUser) {
               currentUser = state.users.find(u => u.id === currentUser.id) || currentUser;
             }
-            render();
-          } else if (localTime > remoteTime) {
+            applyingRemote = false;
+            if (currentUser) render();
+          } else if (localTime > remoteTime && localHasData) {
             await pushStateToCloud(true);
           }
         } else {
           await pushStateToCloud(true);
         }
-
-        fbUnsub = sdk.onSnapshot(ref, (docSnap) => {
-          if (!docSnap.exists() || docSnap.metadata.hasPendingWrites) return;
-          const remotePayload = docSnap.data();
-          const remoteState = normalizeState(remotePayload?.data || remotePayload);
-          const remoteTime = new Date(remoteState.updatedAt || 0).getTime();
-          const localTime = new Date(state.updatedAt || 0).getTime();
-          if (remoteTime > localTime) {
-            applyingRemote = true;
-            state = remoteState;
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-            if (currentUser) {
-              currentUser = state.users.find(u => u.id === currentUser.id) || currentUser;
-            }
-            applyingRemote = false;
-            fbStatusText = 'Bağlı (Canlı Eşitleniyor)';
-            render();
-            toast('Diğer cihazdaki değişiklikler eşitlendi.', 'info');
-          }
-        }, () => {
-          fbStatusText = 'Bulut Bağlantı Hatası';
-        });
       } catch (e) {
-        fbStatusText = 'Firebase Yapılandırma Hatası';
+        cloudStatusText = 'Supabase Bağlantı Bekleniyor';
       }
     }
 
-    window.addEventListener('firebase-sdk-ready', () => {
-      initFirebaseSync();
+    async function initSupabaseSync() {
+      if (supaChannel && window.__SUPABASE_CLIENT__) {
+        try { await window.__SUPABASE_CLIENT__.removeChannel(supaChannel); } catch (e) {}
+        supaChannel = null;
+      }
+      if (supaPollTimer) {
+        clearInterval(supaPollTimer);
+        supaPollTimer = null;
+      }
+
+      if (!supaSyncCfg.enabled) {
+        cloudStatusText = 'Yerel Mod (Bulut Kapalı)';
+        return;
+      }
+
+      const client = window.__SUPABASE_CLIENT__;
+      const tableName = window.__SUPABASE_SYNC_TABLE__ || 'store_sync';
+      if (!client) {
+        cloudStatusText = 'Supabase SDK Yükleniyor...';
+        return;
+      }
+
+      await pullAndSyncFromCloud();
+
+      const rowId = (supaSyncCfg.storeRowId || 'dogu_store_main').trim() || 'dogu_store_main';
+      try {
+        supaChannel = client
+          .channel('dogu_store_sync_' + rowId)
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: tableName,
+              filter: `id=eq.${rowId}`
+            },
+            (evt) => {
+              const nextPayload = evt?.new?.payload;
+              if (!nextPayload) return;
+              const changed = applyRemoteSnapshot(nextPayload);
+              if (changed) {
+                cloudStatusText = 'Supabase Bağlı (Canlı)';
+                if (currentUser) render();
+                toast('Diğer cihazdaki değişiklikler eşitlendi.', 'info');
+              }
+            }
+          )
+          .subscribe();
+      } catch (e) {}
+
+      supaPollTimer = setInterval(() => {
+        if (!applyingRemote && supaSyncCfg.enabled) {
+          pullAndSyncFromCloud();
+        }
+      }, 8000);
+    }
+
+    window.addEventListener('supabase-sdk-ready', () => {
+      initSupabaseSync();
     });
 
     function saveState() {
       state.updatedAt = nowISO();
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
-      if (hasValidFirebaseConfig(fbConfig)) {
+      if (isCloudSyncEnabled(supaSyncCfg)) {
         pushStateToCloud(true);
       }
     }
@@ -1348,7 +1370,7 @@
             <div class="logo-badge" style="width:60px;height:60px;margin:0 auto;font-size:22px;border-radius:18px;">${esc(state.settings.storeLogoText || 'DS')}</div>
             <h1 class="title-lg" style="font-size:24px;">${esc(state.settings.storeName || 'DOĞU STORE')}</h1>
             <div class="muted">Mağaza, Stok, Barkod, Veresiye ve Finans</div>
-            <div class="muted ${hasValidFirebaseConfig(fbConfig)?'text-green':'text-amber'}">${esc(fbStatusText)}</div>
+            <div class="muted ${isCloudSyncEnabled(supaSyncCfg)?'text-green':'text-amber'}">${esc(cloudStatusText)}</div>
           </div>
 
           <div class="card stack">
@@ -1414,7 +1436,7 @@
             <div class="logo-badge">${esc(state.settings.storeLogoText || 'DS')}</div>
             <div style="min-width:0;">
               <div style="font-weight:800;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(state.settings.storeName || 'DOĞU STORE')}</div>
-              <div class="muted">${esc(currentUser.name)} • ${isAdmin() ? 'Yönetici' : 'Personel'} • <span class="${hasValidFirebaseConfig(fbConfig)?'text-green':'text-amber'}">${esc(fbStatusText)}</span></div>
+              <div class="muted">${esc(currentUser.name)} • ${isAdmin() ? 'Yönetici' : 'Personel'} • <span class="${isCloudSyncEnabled(supaSyncCfg)?'text-green':'text-amber'}">${esc(cloudStatusText)}</span></div>
             </div>
           </div>
           <div class="row-gap">
@@ -2358,24 +2380,18 @@
 
         <div class="card stack">
           <div class="row-between">
-            <div class="title-md" style="margin:0;">Bulut Senkronizasyonu (Firebase Firestore)</div>
-            <span class="muted ${hasValidFirebaseConfig(fbConfig)?'text-green':'text-amber'}" style="font-weight:700;">${esc(fbStatusText)}</span>
+            <div class="title-md" style="margin:0;">Bulut Senkronizasyonu (Supabase PostgreSQL)</div>
+            <span class="muted ${isCloudSyncEnabled(supaSyncCfg)?'text-green':'text-amber'}" style="font-weight:700;">${esc(cloudStatusText)}</span>
           </div>
-          <div class="muted">Telefon ve bilgisayarda aynı bilgileri girerek tüm verileri otomatik eşitleyebilirsiniz.</div>
-          <div class="grid-3">
-            <div><label class="lbl">apiKey *</label><input id="fbApiKey" type="text" value="${esc(fbConfig.apiKey)}" placeholder="AIzaSy..." class="input" /></div>
-            <div><label class="lbl">projectId *</label><input id="fbProjectId" type="text" value="${esc(fbConfig.projectId)}" placeholder="magaza-projesi" class="input" /></div>
-            <div><label class="lbl">Mağaza Kimliği (Doc ID)</label><input id="fbDocId" type="text" value="${esc(fbConfig.storeDocId)}" placeholder="dogu_store_main" class="input" /></div>
-          </div>
-          <div class="grid-3">
-            <div><label class="lbl">authDomain</label><input id="fbAuthDomain" type="text" value="${esc(fbConfig.authDomain)}" placeholder="proje.firebaseapp.com" class="input" /></div>
-            <div><label class="lbl">storageBucket</label><input id="fbBucket" type="text" value="${esc(fbConfig.storageBucket)}" placeholder="proje.appspot.com" class="input" /></div>
-            <div><label class="lbl">appId</label><input id="fbAppId" type="text" value="${esc(fbConfig.appId)}" placeholder="1:123:web:abc" class="input" /></div>
+          <div class="muted">Proje: <strong>dogu-store-yeni</strong> • Tablo: <strong>store_sync</strong>. Tüm cihazlarda aynı Mağaza Kayıt ID'si ile canlı eşlenir.</div>
+          <div class="grid-2">
+            <div><label class="lbl">Mağaza Kayıt ID (store_sync.id)</label><input id="supaRowId" type="text" value="${esc(supaSyncCfg.storeRowId)}" placeholder="dogu_store_main" class="input" /></div>
+            <div><label class="lbl">Supabase Durumu</label><input type="text" value="https://lrzrlghlahbdkocunlvv.supabase.co" disabled class="input" /></div>
           </div>
           <div class="row-gap">
-            <button onclick="saveFirebaseSettings()" class="btn btn-primary btn-sm">Bulutu Kaydet ve Bağlan</button>
-            <button onclick="pushStateToCloud(false)" class="btn btn-success btn-sm">Şimdi Buluta Gönder</button>
-            <button onclick="clearFirebaseSettings()" class="btn btn-secondary btn-sm">Bulut Bağlantısını Kaldır</button>
+            <button onclick="saveSupabaseSyncSettings()" class="btn btn-primary btn-sm">Kaydet ve Eşitle</button>
+            <button onclick="pushStateToCloud(false)" class="btn btn-success btn-sm">Şimdi Supabase'e Gönder</button>
+            <button onclick="toggleSupabaseSync()" class="btn btn-secondary btn-sm">${supaSyncCfg.enabled ? 'Bulut Eşitlemeyi Durdur' : 'Bulut Eşitlemeyi Aç'}</button>
           </div>
         </div>
 
@@ -2418,38 +2434,34 @@
       `;
     }
 
-    async function saveFirebaseSettings() {
-      const nextCfg = {
-        apiKey: (document.getElementById('fbApiKey')?.value || '').trim(),
-        projectId: (document.getElementById('fbProjectId')?.value || '').trim(),
-        storeDocId: ((document.getElementById('fbDocId')?.value || 'dogu_store_main').trim() || 'dogu_store_main'),
-        authDomain: (document.getElementById('fbAuthDomain')?.value || '').trim(),
-        storageBucket: (document.getElementById('fbBucket')?.value || '').trim(),
-        messagingSenderId: fbConfig.messagingSenderId || '',
-        appId: (document.getElementById('fbAppId')?.value || '').trim()
-      };
-      if (!nextCfg.apiKey || !nextCfg.projectId) {
-        toast('En az apiKey ve projectId alanlarını girin!', 'error');
-        return;
-      }
-      fbConfig = nextCfg;
-      try { localStorage.setItem(FB_CONFIG_KEY, JSON.stringify(fbConfig)); } catch (e) {}
-      await initFirebaseSync();
+    async function saveSupabaseSyncSettings() {
+      const rowId = ((document.getElementById('supaRowId')?.value || 'dogu_store_main').trim() || 'dogu_store_main');
+      supaSyncCfg = { storeRowId: rowId, enabled: true };
+      try { localStorage.setItem(SUPA_SYNC_CFG_KEY, JSON.stringify(supaSyncCfg)); } catch (e) {}
+      await initSupabaseSync();
+      await pushStateToCloud(false);
       render();
-      toast('Firebase ayarları kaydedildi ve bağlantı başlatıldı.', 'success');
     }
 
-    function clearFirebaseSettings() {
-      if (fbUnsub) {
-        try { fbUnsub(); } catch (e) {}
-        fbUnsub = null;
+    async function toggleSupabaseSync() {
+      if (supaSyncCfg.enabled) {
+        supaSyncCfg = { ...supaSyncCfg, enabled: false };
+        try { localStorage.setItem(SUPA_SYNC_CFG_KEY, JSON.stringify(supaSyncCfg)); } catch (e) {}
+        if (supaChannel && window.__SUPABASE_CLIENT__) {
+          try { await window.__SUPABASE_CLIENT__.removeChannel(supaChannel); } catch (e) {}
+          supaChannel = null;
+        }
+        if (supaPollTimer) { clearInterval(supaPollTimer); supaPollTimer = null; }
+        cloudStatusText = 'Yerel Mod (Bulut Kapalı)';
+        render();
+        toast('Bulut eşitleme durduruldu.', 'info');
+      } else {
+        supaSyncCfg = { ...supaSyncCfg, enabled: true };
+        try { localStorage.setItem(SUPA_SYNC_CFG_KEY, JSON.stringify(supaSyncCfg)); } catch (e) {}
+        await initSupabaseSync();
+        render();
+        toast('Bulut eşitleme aktif edildi.', 'success');
       }
-      fbDb = null;
-      fbConfig = { apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', storeDocId: 'dogu_store_main' };
-      try { localStorage.removeItem(FB_CONFIG_KEY); } catch (e) {}
-      fbStatusText = 'Yerel Mod (Firebase Bağlı Değil)';
-      render();
-      toast('Bulut bağlantısı kaldırıldı; yerel hafıza kullanılıyor.', 'info');
     }
 
     function saveSet() {
@@ -2524,8 +2536,8 @@
     }
 
     render();
-    if (window.__FIREBASE_SDK__ && hasValidFirebaseConfig(fbConfig)) {
-      initFirebaseSync();
+    if (window.__SUPABASE_CLIENT__ && supaSyncCfg.enabled) {
+      initSupabaseSync();
     }
   </script>
 </body>
