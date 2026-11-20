@@ -280,11 +280,12 @@
       position: fixed;
       inset: 0;
       z-index: 100;
-      background: rgba(0,0,0,0.82);
+      background: rgba(0,0,0,0.85);
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 16px;
+      overflow-y: auto;
     }
     .login-wrap {
       min-height: 100dvh;
@@ -295,28 +296,63 @@
       margin: 0 auto;
       padding: 20px;
     }
+    .scan-frame-wrap {
+      position: relative;
+      width: 100%;
+      min-height: 210px;
+      max-height: 260px;
+      border-radius: 12px;
+      background: #000;
+      overflow: hidden;
+      border: 1px solid var(--border-2);
+    }
+    .scan-line {
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 50%;
+      height: 2px;
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
   <div id="app" class="app-shell"></div>
   <div id="toast" class="toast-box hidden"></div>
 
-  <!-- Barkod Okuma Modalı -->
+  <!-- Gelişmiş Barkod Okuma Modalı -->
   <div id="barcodeModal" class="modal-backdrop hidden">
     <div class="card stack" style="width:100%;max-width:440px;">
       <div class="row-between">
         <div class="title-md" style="margin:0;">Barkod Okut / Gir</div>
         <button onclick="closeBarcodeModal()" class="btn btn-danger btn-sm">Kapat</button>
       </div>
-      <div class="muted" id="barcodeModalHint">iPhone kamerası ile barkodu tarayabilir veya barkod numarasını doğrudan girebilirsiniz.</div>
-      <video id="barcodeVideo" playsinline autoplay muted style="width:100%;max-height:240px;border-radius:12px;background:#000;object-fit:cover;"></video>
-      <div class="row-gap">
-        <button id="startCamBtn" onclick="startCameraScan()" class="btn btn-warning btn-sm" style="flex:1;">Kamerayı Başlat</button>
-        <button onclick="stopCameraScan()" class="btn btn-secondary btn-sm">Kamerayı Durdur</button>
+      <div class="muted" id="barcodeModalHint">Barkodu kameraya tutun, fotoğrafını çekin veya numarasını girin.</div>
+      <div id="barcodeStatus" class="muted text-amber" style="font-weight:700;">Durum: Hazır</div>
+
+      <div class="scan-frame-wrap">
+        <video id="barcodeVideo" playsinline autoplay muted style="width:100%;height:220px;object-fit:cover;display:block;"></video>
+        <div class="scan-line"></div>
       </div>
+
+      <div class="grid-2">
+        <button id="startCamBtn" type="button" onclick="startCameraScan()" class="btn btn-warning btn-sm">Canlı Kamera</button>
+        <label class="btn btn-success btn-sm" style="cursor:pointer;">
+          Fotoğraf Çek / Seç
+          <input id="photoBarcodeInput" type="file" accept="image/*" capture="environment" onchange="handleBarcodePhoto(event)" class="hidden" />
+        </label>
+      </div>
+
       <div class="row-gap">
-        <input id="manualBarcodeInput" type="text" placeholder="Barkod numarası yazın..." class="input" style="flex:1;" onkeydown="if(event.key==='Enter') submitManualBarcode()" />
-        <button onclick="submitManualBarcode()" class="btn btn-primary btn-sm">Tamam</button>
+        <button type="button" onclick="captureFrameAndDecode()" class="btn btn-secondary btn-sm" style="flex:1;">Anlık Kareyi Tara</button>
+        <button type="button" onclick="stopCameraScan()" class="btn btn-secondary btn-sm">Kamerayı Kapat</button>
+      </div>
+
+      <div class="row-gap">
+        <input id="manualBarcodeInput" type="text" inputmode="numeric" placeholder="Barkod numarasını yazın..." class="input" style="flex:1;" onkeydown="if(event.key==='Enter') submitManualBarcode()" />
+        <button type="button" onclick="submitManualBarcode()" class="btn btn-primary btn-sm">Kullan</button>
       </div>
     </div>
   </div>
@@ -338,7 +374,7 @@
   </div>
 
   <script>
-    const STORAGE_KEY = 'DOGU_STORE_V3_DATA';
+    const STORAGE_KEY = 'DOGU_STORE_V4_DATA';
 
     function uid(p='id') {
       return p + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
@@ -382,7 +418,7 @@
 
     function loadState() {
       try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('DOGU_STORE_V3_DATA') || localStorage.getItem('DOGU_STORE_V2_DATA');
         if (!raw) return defaultState();
         const p = JSON.parse(raw);
         const d = defaultState();
@@ -427,7 +463,15 @@
       el.style.background = kind === 'error' ? '#450a0a' : kind === 'success' ? '#064e3b' : '#1e293b';
       el.classList.remove('hidden');
       clearTimeout(toast._t);
-      toast._t = setTimeout(() => el.classList.add('hidden'), 2600);
+      toast._t = setTimeout(() => el.classList.add('hidden'), 2800);
+    }
+
+    function setScanStatus(msg, colorClass='text-amber') {
+      const el = document.getElementById('barcodeStatus');
+      if (!el) return;
+      el.className = 'muted ' + colorClass;
+      el.style.fontWeight = '700';
+      el.textContent = 'Durum: ' + msg;
     }
 
     function logAction(action, detail) {
@@ -475,11 +519,198 @@
       resolvePinModal(true);
     }
 
+    const EAN_L = {
+      '0001101':'0','0011001':'1','0010011':'2','0111101':'3','0100011':'4',
+      '0110001':'5','0101111':'6','0111011':'7','0110111':'8','0001011':'9'
+    };
+    const EAN_G = {
+      '0100111':'0','0110011':'1','0011011':'2','0100001':'3','0011101':'4',
+      '0111001':'5','0000101':'6','0010001':'7','0001001':'8','0010111':'9'
+    };
+    const EAN_R = {
+      '1110010':'0','1100110':'1','1101100':'2','1000010':'3','1011100':'4',
+      '1001110':'5','1010000':'6','1000100':'7','1001000':'8','1110100':'9'
+    };
+    const EAN13_PARITY = {
+      'LLLLLL':'0','LLGLGG':'1','LLGGLG':'2','LLGGGL':'3','LGLLGG':'4',
+      'LGGLLG':'5','LGGGLL':'6','LGLGLG':'7','LGLGGL':'8','LGGLGL':'9'
+    };
+
+    function isValidEAN13(code) {
+      if (!/^\d{13}$/.test(code)) return false;
+      let sum = 0;
+      for (let i = 0; i < 12; i++) {
+        sum += Number(code[i]) * (i % 2 === 0 ? 1 : 3);
+      }
+      const check = (10 - (sum % 10)) % 10;
+      return check === Number(code[12]);
+    }
+
+    function isValidEAN8(code) {
+      if (!/^\d{8}$/.test(code)) return false;
+      let sum = 0;
+      for (let i = 0; i < 7; i++) {
+        sum += Number(code[i]) * (i % 2 === 0 ? 3 : 1);
+      }
+      const check = (10 - (sum % 10)) % 10;
+      return check === Number(code[7]);
+    }
+
+    function decodeEANFromRow(row) {
+      const n = row.length;
+      if (n < 95) return null;
+      const runs = [];
+      let cur = row[0], cnt = 1;
+      for (let i = 1; i < n; i++) {
+        if (row[i] === cur) cnt++;
+        else { runs.push({ v: cur, len: cnt }); cur = row[i]; cnt = 1; }
+      }
+      runs.push({ v: cur, len: cnt });
+
+      for (let startIdx = 1; startIdx < runs.length - 20; startIdx++) {
+        const g1 = runs[startIdx]?.len || 0;
+        const g2 = runs[startIdx + 1]?.len || 0;
+        const g3 = runs[startIdx + 2]?.len || 0;
+        if (g1 <= 0 || g2 <= 0 || g3 <= 0) continue;
+        const avgMod = (g1 + g2 + g3) / 3;
+        if (avgMod < 1.2) continue;
+
+        let startPx = 0;
+        for (let k = 0; k < startIdx; k++) startPx += runs[k].len;
+
+        const span13 = avgMod * 95;
+        if (startPx + span13 <= n) {
+          const bits = [];
+          for (let m = 0; m < 95; m++) {
+            const px = Math.min(n - 1, Math.floor(startPx + (m + 0.5) * avgMod));
+            bits.push(row[px]);
+          }
+          if (bits[0]===1 && bits[1]===0 && bits[2]===1 &&
+              bits[45]===0 && bits[46]===1 && bits[47]===0 && bits[48]===1 && bits[49]===0 &&
+              bits[92]===1 && bits[93]===0 && bits[94]===1) {
+            let parity = '';
+            let leftDigits = '';
+            let ok = true;
+            for (let d = 0; d < 6; d++) {
+              const pat = bits.slice(3 + d * 7, 3 + (d + 1) * 7).join('');
+              if (EAN_L[pat]) { parity += 'L'; leftDigits += EAN_L[pat]; }
+              else if (EAN_G[pat]) { parity += 'G'; leftDigits += EAN_G[pat]; }
+              else { ok = false; break; }
+            }
+            if (ok && EAN13_PARITY[parity]) {
+              let rightDigits = '';
+              for (let d = 0; d < 6; d++) {
+                const pat = bits.slice(50 + d * 7, 50 + (d + 1) * 7).join('');
+                if (EAN_R[pat]) rightDigits += EAN_R[pat];
+                else { ok = false; break; }
+              }
+              if (ok) {
+                const full13 = EAN13_PARITY[parity] + leftDigits + rightDigits;
+                if (isValidEAN13(full13)) return full13;
+              }
+            }
+          }
+        }
+
+        const span8 = avgMod * 67;
+        if (startPx + span8 <= n) {
+          const bits8 = [];
+          for (let m = 0; m < 67; m++) {
+            const px = Math.min(n - 1, Math.floor(startPx + (m + 0.5) * avgMod));
+            bits8.push(row[px]);
+          }
+          if (bits8[0]===1 && bits8[1]===0 && bits8[2]===1 &&
+              bits8[31]===0 && bits8[32]===1 && bits8[33]===0 && bits8[34]===1 && bits8[35]===0 &&
+              bits8[64]===1 && bits8[65]===0 && bits8[66]===1) {
+            let d8 = '';
+            let ok8 = true;
+            for (let d = 0; d < 4; d++) {
+              const pat = bits8.slice(3 + d * 7, 3 + (d + 1) * 7).join('');
+              if (EAN_L[pat]) d8 += EAN_L[pat]; else { ok8 = false; break; }
+            }
+            if (ok8) {
+              for (let d = 0; d < 4; d++) {
+                const pat = bits8.slice(36 + d * 7, 36 + (d + 1) * 7).join('');
+                if (EAN_R[pat]) d8 += EAN_R[pat]; else { ok8 = false; break; }
+              }
+            }
+            if (ok8 && isValidEAN8(d8)) return d8;
+          }
+        }
+      }
+      return null;
+    }
+
+    function decodeBarcodeFromCanvas(canvas) {
+      try {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const w = canvas.width, h = canvas.height;
+        if (!w || !h) return null;
+        const img = ctx.getImageData(0, 0, w, h).data;
+        const rowsToTest = [0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72];
+
+        for (const ratio of rowsToTest) {
+          const y = Math.min(h - 1, Math.max(0, Math.floor(h * ratio)));
+          const lum = new Float32Array(w);
+          let sum = 0;
+          for (let x = 0; x < w; x++) {
+            const idx = (y * w + x) * 4;
+            const v = 0.299 * img[idx] + 0.587 * img[idx + 1] + 0.114 * img[idx + 2];
+            lum[x] = v;
+            sum += v;
+          }
+          const avg = sum / w;
+          const row = new Uint8Array(w);
+          for (let x = 0; x < w; x++) row[x] = lum[x] < avg ? 1 : 0;
+
+          const code = decodeEANFromRow(row);
+          if (code) return code;
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    async function decodeFromImageSource(source) {
+      if ('BarcodeDetector' in window) {
+        try {
+          const detector = new window.BarcodeDetector({
+            formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e', 'itf']
+          });
+          const codes = await detector.detect(source);
+          if (codes && codes.length && codes[0].rawValue) {
+            return String(codes[0].rawValue).trim();
+          }
+        } catch (e) {}
+      }
+
+      const c = document.createElement('canvas');
+      const sw = source.videoWidth || source.naturalWidth || source.width || 0;
+      const sh = source.videoHeight || source.naturalHeight || source.height || 0;
+      if (!sw || !sh) return null;
+      const targetW = Math.min(1280, sw);
+      const scale = targetW / sw;
+      c.width = targetW;
+      c.height = Math.max(120, Math.floor(sh * scale));
+      const ctx = c.getContext('2d');
+      ctx.drawImage(source, 0, 0, c.width, c.height);
+      return decodeBarcodeFromCanvas(c);
+    }
+
+    function completeBarcodeScan(code) {
+      const clean = String(code || '').trim();
+      if (!clean) return;
+      const fn = barcodeCallback;
+      closeBarcodeModal();
+      if (fn) fn(clean);
+    }
+
     function openBarcodeModal(cb, hint) {
       barcodeCallback = cb;
-      document.getElementById('barcodeModalHint').textContent = hint || 'Barkod okutun veya barkod numarasını girin.';
+      document.getElementById('barcodeModalHint').textContent = hint || 'Barkod okutun, fotoğraf çekin veya barkod numarasını girin.';
       document.getElementById('manualBarcodeInput').value = '';
+      document.getElementById('photoBarcodeInput').value = '';
       document.getElementById('barcodeModal').classList.remove('hidden');
+      setScanStatus('Kamera hazırlanıyor...', 'text-amber');
       startCameraScan();
     }
 
@@ -487,32 +718,65 @@
       stopCameraScan();
       const video = document.getElementById('barcodeVideo');
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        toast('Kamera API desteklenmiyor; barkodu elle girebilirsiniz.', 'info');
+        setScanStatus('Canlı kamera desteklenmiyor; "Fotoğraf Çek / Seç" veya manuel girişi kullanın.', 'text-amber');
         return;
       }
       try {
-        camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        setScanStatus('Kamera açılıyor...', 'text-amber');
+        camStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        });
         video.srcObject = camStream;
-        if ('BarcodeDetector' in window) {
-          const detector = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e'] });
-          camTimer = setInterval(async () => {
-            if (!camStream || video.readyState < 2) return;
-            try {
-              const codes = await detector.detect(video);
-              if (codes && codes.length) {
-                const val = String(codes[0].rawValue || '').trim();
-                if (val) {
-                  const fn = barcodeCallback;
-                  closeBarcodeModal();
-                  if (fn) fn(val);
-                }
-              }
-            } catch (e) {}
-          }, 350);
-        }
+        await video.play().catch(() => {});
+        setScanStatus('Barkodu kırmızı çizgiye hizalayın...', 'text-green');
+
+        camTimer = setInterval(async () => {
+          if (!camStream || video.readyState < 2) return;
+          const found = await decodeFromImageSource(video);
+          if (found) completeBarcodeScan(found);
+        }, 450);
       } catch (e) {
-        toast('Kamera açılamadı; manuel barkod girişini kullanabilirsiniz.', 'info');
+        setScanStatus('Kamera açılamadı; "Fotoğraf Çek / Seç" butonuna basarak barkod çekebilirsiniz.', 'text-amber');
       }
+    }
+
+    async function captureFrameAndDecode() {
+      const video = document.getElementById('barcodeVideo');
+      if (!video || video.readyState < 2) {
+        toast('Kamera görüntüsü hazır değil; "Fotoğraf Çek / Seç" kullanabilirsiniz.', 'info');
+        return;
+      }
+      setScanStatus('Kare taranıyor...', 'text-amber');
+      const found = await decodeFromImageSource(video);
+      if (found) {
+        completeBarcodeScan(found);
+      } else {
+        setScanStatus('Karede barkod okunamadı; daha net hizalayın veya fotoğraf çekin.', 'text-red');
+        toast('Barkod okunamadı, tekrar deneyin.', 'error');
+      }
+    }
+
+    function handleBarcodePhoto(ev) {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      setScanStatus('Fotoğraf taranıyor...', 'text-amber');
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = async () => {
+          const found = await decodeFromImageSource(img);
+          if (found) {
+            completeBarcodeScan(found);
+          } else {
+            setScanStatus('Fotoğrafta barkod okunamadı; numarayı aşağıya yazabilirsiniz.', 'text-red');
+            const inp = document.getElementById('manualBarcodeInput');
+            if (inp) inp.focus();
+            toast('Fotoğraftan barkod okunamadı; barkod numarasını manuel girebilirsiniz.', 'info');
+          }
+        };
+        img.src = String(reader.result || '');
+      };
+      reader.readAsDataURL(file);
     }
 
     function stopCameraScan() {
@@ -534,9 +798,7 @@
     function submitManualBarcode() {
       const code = (document.getElementById('manualBarcodeInput').value || '').trim();
       if (!code) { toast('Barkod numarası girin.', 'error'); return; }
-      const fn = barcodeCallback;
-      closeBarcodeModal();
-      if (fn) fn(code);
+      completeBarcodeScan(code);
     }
 
     function findVariantByBarcode(code) {
@@ -716,14 +978,33 @@
           </button>
         </nav>
       `;
+      if (activeTab === 'products') drawProductRows();
     }
 
     function onTopScan(code) {
       const found = findVariantByBarcode(code);
-      if (!found) { toast('Barkod bulunamadı: ' + code, 'error'); return; }
-      activeTab = 'pos';
-      render();
-      addToCart(found.product.id, found.variant.id);
+      if (found) {
+        activeTab = 'pos';
+        render();
+        addToCart(found.product.id, found.variant.id);
+      } else if (isAdmin()) {
+        activeTab = 'products';
+        render();
+        openNewProductWithBarcode(code);
+      } else {
+        toast('Barkod bulunamadı: ' + code, 'error');
+      }
+    }
+
+    function openNewProductWithBarcode(code) {
+      const box = document.getElementById('newProdBox');
+      if (box) box.classList.remove('hidden');
+      const inp = document.getElementById('pBarcode');
+      if (inp) {
+        inp.value = code;
+        inp.focus();
+      }
+      toast('Barkod okundu: ' + code + ' — Ürün bilgilerini girip Kaydet\'e basın.', 'success');
     }
 
     function renderView() {
@@ -819,7 +1100,7 @@
                 <label class="lbl">Barkod</label>
                 <div class="row-gap">
                   <input id="pBarcode" type="text" class="input" style="flex:1;" placeholder="Barkod" />
-                  <button type="button" onclick="openBarcodeModal(c=>{document.getElementById('pBarcode').value=c;}, 'Barkod okut')" class="btn btn-secondary btn-sm">Okut</button>
+                  <button type="button" onclick="openBarcodeModal(c=>{ const el=document.getElementById('pBarcode'); if(el) el.value=c; toast('Barkod eklendi: '+c, 'success'); }, 'Ürün barkodu okut')" class="btn btn-warning btn-sm">Okut</button>
                 </div>
               </div>
               <div><label class="lbl">Stok Adedi</label><input id="pStock" type="number" class="input" value="1" /></div>
@@ -867,7 +1148,7 @@
           type: 'in', qtyChange: stock, reason: 'İlk stok girişi', userName: currentUser.name, createdAt: nowISO()
         });
       }
-      logAction('Ürün Eklendi', `${name} (${size}/${color}) • Satış: ${formatTL(sellPrice)} • Stok: ${stock}`);
+      logAction('Ürün Eklendi', `${name} (${size}/${color}) • Barkod: ${barcode || '-'} • Satış: ${formatTL(sellPrice)} • Stok: ${stock}`);
       saveState();
       render();
       toast('Ürün eklendi!', 'success');
@@ -1017,7 +1298,7 @@
       return `
         <div class="row-between">
           <h2 class="title-lg">Satış Ekranı</h2>
-          <button onclick="openBarcodeModal(c=>{ const f=findVariantByBarcode(c); if(!f) toast('Barkod bulunamadı','error'); else addToCart(f.product.id,f.variant.id); }, 'Satış barkodu okut')" class="btn btn-warning btn-sm">Barkod Okut</button>
+          <button onclick="openBarcodeModal(c=>{ const f=findVariantByBarcode(c); if(!f) toast('Barkod bulunamadı: '+c,'error'); else addToCart(f.product.id,f.variant.id); }, 'Satış barkodu okut')" class="btn btn-warning btn-sm">Barkod Okut</button>
         </div>
 
         <div class="pos-layout">
